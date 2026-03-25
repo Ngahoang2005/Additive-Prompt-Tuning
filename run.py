@@ -24,7 +24,23 @@ def create_args():
     
     # This function prepares the variables shared across demo.py
     parser = argparse.ArgumentParser()
-
+    # Thêm các đối số còn thiếu vào đây
+    parser.add_argument('--dataset', type=str, default='CIFAR100', help="Name of dataset")
+    parser.add_argument('--model_type', type=str, default='vit_pt_imnet', help="Type of model")
+    parser.add_argument('--model_name', type=str, default='vit_base', help="Name of model architecture")
+    parser.add_argument('--dataroot', type=str, default='data', help="Path to datasets")
+    parser.add_argument('--workers', type=int, default=4, help="Number of data loading workers")
+    parser.add_argument('--rand_split', default=False, action='store_true', help='Randomize class order')
+    parser.add_argument('--validation', default=False, action='store_true', help='Use validation set')
+    parser.add_argument('--train_aug', default=False, action='store_true', help='Use training augmentation')
+    parser.add_argument('--max_task', type=int, default=-1, help="Maximum number of tasks")
+    parser.add_argument('--first_split_size', type=int, default=10, help="Size of first task split")
+    parser.add_argument('--other_split_size', type=int, default=10, help="Size of other task splits")
+    parser.add_argument('--optimizer', type=str, default='Adam', help="Optimizer type")
+    parser.add_argument('--momentum', type=float, default=0.9, help="Momentum")
+    parser.add_argument('--weight_decay', type=float, default=0.0, help="Weight decay")
+    parser.add_argument('--schedule_type', type=str, default='cosine', help="LR schedule type")
+    parser.add_argument('--prompt_flag', type=str, default='apt', help="Prompting flag")
     # Standard Args
     parser.add_argument('--gpuid', nargs="+", type=int, default=[0],
                          help="The list of gpuid, ex:--gpuid 3 1. Negative value means cpu-only")

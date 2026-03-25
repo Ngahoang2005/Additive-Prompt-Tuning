@@ -1,76 +1,57 @@
 #!/bin/bash
 
-# experiment settings
-DATASET=cifar-100
-N_CLASS=100
+# 1. Cấu hình cơ bản
+DATASET=CIFAR100  # Nên khớp với tên trong trainer.py
+CONFIG=configs/config.yaml # Đảm bảo file này tồn tại
 
-# hard coded inputs
-GPUID='6'
-CONFIG=configs/cifar-100_prompt.yaml
+# 2. Sửa GPUID thành 0 (Kaggle chuẩn)
+GPUID='0'
 REPEAT=1
 OVERWRITE=0
 
-# hyperparameter arrays
+# 3. Tham số huấn luyện
 LR=0.004
 SCHEDULE=30
 EMA_COEFF=0.7
 SEED_LIST=(1 2 3)
 
-# Set delay between experiments (in seconds)
-DELAY_BETWEEN_EXPERIMENTS=10  # Adjust this value as needed
-
-# Create log directory
-LOG_DIR="logs"
-mkdir -p $LOG_DIR
+# 4. Tạo thư mục log CẨN THẬN
+LOG_DIR="logs/${DATASET}"
+mkdir -p "$LOG_DIR"
 
 for seed in "${SEED_LIST[@]}"
-    do
-        # save directory
-        OUTDIR="./checkpoints/${DATASET}/seed${seed}"
-        mkdir -p $OUTDIR
+do
+    OUTDIR="./checkpoints/${DATASET}/seed${seed}"
+    mkdir -p "$OUTDIR"
+    LOG_FILE="${LOG_DIR}/seed${seed}.log"
 
-        # Create unique log file name
-        LOG_FILE="${LOG_DIR}/${DATASET}/seed${seed}.log"
+    echo "Starting experiment with seed=$seed"
+    
+    # Chạy trực tiếp, bỏ nohup để dễ debug trên Notebook
+    python -u run.py \
+        --config $CONFIG \
+        --dataset $DATASET \
+        --gpuid $GPUID \
+        --repeat $REPEAT \
+        --overwrite $OVERWRITE \
+        --learner_type prompt \
+        --learner_name APT_Learner \
+        --prompt_param "100" "0.01" \
+        --lr $LR \
+        --seed $seed \
+        --ema_coeff $EMA_COEFF \
+        --schedule $SCHEDULE \
+        --log_dir ${OUTDIR} 2>&1 | tee "$LOG_FILE"
 
-        echo "Starting experiment with seed=$seed"
-        
-        nohup python -u run.py \
-            --config $CONFIG \
-            --gpuid $GPUID \
-            --repeat $REPEAT \
-            --overwrite $OVERWRITE \
-            --learner_type prompt \
-            --learner_name APT_Learner \
-            --prompt_param 0.01 \
-            --lr $LR \
-            --seed $seed \
-            --ema_coeff $EMA_COEFF \
-            --schedule $SCHEDULE \
-            --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 &
+    # Kiểm tra lỗi sau khi chạy xong
+    if [ $? -eq 0 ]; then
+        echo "Experiment with seed $seed completed successfully"
+    else
+        echo "Experiment with seed $seed failed. Check $LOG_FILE for details."
+    fi
 
-        # Store the PID of the background process
-        PID=$!
-        
-        # Wait for process to complete
-        wait $PID
-        
-        # Check if process completed successfully
-        if [ $? -eq 0 ]; then
-            echo "Experiment completed successfully"
-        else
-            echo "Experiment failed"
-        fi
-
-        rm -rf ${OUTDIR}/models
-        
-        echo "----------------------------------------"
-        
-        # Add delay before next experiment
-        if [ $current -lt $total_experiments ]; then
-            echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
-            sleep $DELAY_BETWEEN_EXPERIMENTS
-        fi
-    done
+    echo "----------------------------------------"
+    sleep 5
+done
 
 echo "All experiments completed!"
-exit 0

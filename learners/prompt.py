@@ -5,24 +5,34 @@ from utils.metric import accuracy, AverageMeter, Timer
 from .default import NormalNN, weight_reset, accumulate_acc
 from utils.schedulers import CosineSchedule
 
+# 1. Thêm công cụ AMP của PyTorch
+from torch.cuda.amp import autocast, GradScaler
+
 class Prompt_Learner(NormalNN):
     def __init__(self, learner_config):
         self.prompt_param = learner_config['prompt_param']
         self.ema_coeff = learner_config['ema_coeff']
         super(Prompt_Learner, self).__init__(learner_config)
+        
+        # 2. Khởi tạo bộ Scaler để phóng to/thu nhỏ gradient trong môi trường 16-bit
+        self.scaler = GradScaler()
 
     def update_model(self, inputs, targets):
-        # logits
-        logits = self.model(inputs, train=True)
-        
-        logits = logits[:,:self.valid_out_dim]
-        logits[:,:self.last_valid_out_dim] = -float('inf')
-        total_loss = self.criterion(logits, targets.long())       
-        
-        # step
         self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
+        
+        # 3. Bật autocast() để ép GPU tính toán ma trận ở chế độ 16-bit (Siêu nhanh)
+        with autocast():
+            # logits
+            logits = self.model(inputs, train=True)
+            
+            logits = logits[:,:self.valid_out_dim]
+            logits[:,:self.last_valid_out_dim] = -float('inf')
+            total_loss = self.criterion(logits, targets.long())       
+        
+        # 4. Backward và cập nhật trọng số an toàn qua Scaler
+        self.scaler.scale(total_loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         
         return total_loss.detach(), logits
 
@@ -83,4 +93,3 @@ class APT_Learner(Prompt_Learner):
         cfg = self.config
         model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](out_dim=self.out_dim, ema_coeff=self.ema_coeff, prompt_flag = 'apt', prompt_param=self.prompt_param, tasks=self.tasks)
         return model
-

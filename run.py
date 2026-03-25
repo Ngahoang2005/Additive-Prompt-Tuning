@@ -68,7 +68,7 @@ def create_args():
     parser.add_argument('--batch_size', type=int, default=64, help="batch size for training")
     parser.add_argument('--lr', type=float, default=0.005, help="learning rate for training")
     parser.add_argument('--ema_coeff', type=float, default=0.5, help="ema coefficient for prompt merging")
-    parser.add_argument('--schedule', type=int, default=50,  help="epoch size for training")
+    parser.add_argument('--schedule', type=int, default=1,  help="epoch size for training")
 
     # Config Arg
     parser.add_argument('--config', type=str, default="configs/config.yaml",

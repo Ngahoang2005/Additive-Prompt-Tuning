@@ -26,8 +26,8 @@ def create_args():
     parser = argparse.ArgumentParser()
     # Thêm các đối số còn thiếu vào đây
     parser.add_argument('--dataset', type=str, default='CIFAR100', help="Name of dataset")
-    parser.add_argument('--model_type', type=str, default='vit_pt_imnet', help="Type of model")
-    parser.add_argument('--model_name', type=str, default='vit_base', help="Name of model architecture")
+    parser.add_argument('--model_type', type=str, default='zoo', help="Type of model")
+    parser.add_argument('--model_name', type=str, default='vit_pt_imnet', help="Name of model architecture")
     parser.add_argument('--dataroot', type=str, default='data', help="Path to datasets")
     parser.add_argument('--workers', type=int, default=4, help="Number of data loading workers")
     parser.add_argument('--rand_split', default=False, action='store_true', help='Randomize class order')

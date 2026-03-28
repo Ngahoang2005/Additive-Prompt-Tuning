@@ -160,6 +160,12 @@ class NormalNN(nn.Module):
                     lambda_star = (numerator / denominator).item()
                     # Ép lambda_star phải nằm trong khoảng [0, 1]
                     lambda_star = max(0.0, min(1.0, lambda_star))
+                self.log("-" * 40)
+                self.log(f"   + Tử số (Sức kéo Task mới): {numerator.item():.6f}")
+                self.log(f"   + Mẫu số (Tổng lực cản):   {denominator.item():.6f}")
+                self.log(f"   => 🚀 LAMBDA TỐI ƯU (λ*):  {lambda_star:.4f}")
+                self.log("-" * 40)
+
                 # 3. Trộn Prompt với hệ số vừa tìm được
                 merged_p = prompt_module.merge_prompt(global_p, now_task_p, lambda_star)
                 prompt_module.global_merged_prompt.data = merged_p

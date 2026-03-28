@@ -87,32 +87,38 @@ class Prompt_Learner(NormalNN):
         return self
     # === [BECAME ADAPTION] HÀM TÍNH ĐỘ CONG CỦA LOSS (FISHER) ===
     def compute_fisher(self, dataloader):
-        self.model.eval() # Bật chế độ eval để tránh update BN/Dropout
+        self.model.eval() 
         
-        # Xử lý an toàn cho chế độ Multi-GPU (DataParallel)
         prompt_module = self.model.module.prompt if hasattr(self.model, 'module') else self.model.prompt
         fisher = torch.zeros_like(prompt_module.prompt_tokens.data)
+        
+        total_samples = 0 # Thêm biến đếm tổng số mẫu
         
         for i, (input, target, _) in enumerate(dataloader):
             if self.gpu:
                 input = input.cuda()
                 target = target.cuda()
+                
+            batch_size = input.size(0)
+            total_samples += batch_size
             
             self.optimizer.zero_grad()
             
-            # Forward pass bình thường (không dùng autocast để gradient tính ra chính xác tuyệt đối)
             logits = self.model(input, train=True)[:, :self.valid_out_dim]
             logits[:, :self.last_valid_out_dim] = -float('inf')
             
-            # Tính đạo hàm
             loss = self.criterion(logits, target.long())
             loss.backward()
             
-            # Tích lũy bình phương đạo hàm vào Fisher: F = E[(nabla L)^2]
-            fisher += (prompt_module.prompt_tokens.grad.data ** 2) / len(dataloader)
+            # Tích lũy Fisher: Nhân với batch_size hiện tại (Chuẩn code BECAME)
+            fisher += (prompt_module.prompt_tokens.grad.data ** 2) * batch_size
             
         self.optimizer.zero_grad()
+        
+        # Chia cho tổng số mẫu để ra trung bình chuẩn xác nhất
+        fisher = fisher / total_samples
         return fisher.detach()
+    # ==============================================================
     # ==============================================================
 
 class APT_Learner(Prompt_Learner):

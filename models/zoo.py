@@ -1,3 +1,5 @@
+# zoo.py
+
 import itertools
 import torch
 import torch.nn as nn
@@ -33,6 +35,9 @@ class APT(nn.Module):
         global_merged_prompt = torch.zeros(12*2, emb_d).cuda()
         self.register_buffer('global_merged_prompt', global_merged_prompt.clone().detach()) 
 
+        global_fisher = torch.zeros(12*2, emb_d).cuda()
+        self.register_buffer('global_fisher', global_fisher.clone().detach())
+
         trunc_normal_(self.prompt_tokens, std=0.02)
 
         for i in range(12):
@@ -40,9 +45,9 @@ class APT(nn.Module):
             setattr(self, f'v_layer_proj{i}', nn.Linear(2, 2))
          
    
-    def merge_prompt(self, prompt1, prompt2):
-        print("Merging prompt ... ")
-        return prompt1*self.ema_coeff + prompt2*(1-self.ema_coeff)
+    def merge_prompt(self, prompt1, prompt2, lambda_star):
+        print(f"🔥 Tiền hành trộn Prompt với Adaptive Lambda = {lambda_star:.4f}")
+        return prompt1 * (1 - lambda_star) + prompt2 * lambda_star
 
     def _init_smart(self, prompt_param):
         self.prompt_dropout_ratio = float(prompt_param[0])

@@ -2,7 +2,7 @@
  * Based on vit from blip code base
  * https://github.com/salesforce/BLIP
 '''
-
+# vit.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

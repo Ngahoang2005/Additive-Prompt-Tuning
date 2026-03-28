@@ -1,3 +1,4 @@
+#default.py
 from __future__ import print_function
 import math
 import torch
@@ -132,19 +133,41 @@ class NormalNN(nn.Module):
 
                                          
         self.model.train()
-
+        prompt_module = self.model.module.prompt if hasattr(self.model, 'module') else self.model.prompt
         merge_flag = self.model.prompt.merge_flag
 
         if merge_flag:
+            current_fisher = self.compute_fisher(train_loader)
             if self.last_valid_out_dim == 0:
-                self.model.prompt.global_merged_prompt = self.model.prompt.prompt_tokens.clone().detach()
+                prompt_module.global_merged_prompt = prompt_module.prompt_tokens.clone().detach()
+                prompt_module.global_fisher = current_fisher.clone().detach()
             else:
-                now_task_p = self.model.prompt.prompt_tokens.clone().detach()
-                global_p = self.model.prompt.global_merged_prompt
-                merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
+                now_task_p = prompt_module.prompt_tokens.clone().detach()
+                global_p = prompt_module.global_merged_prompt
+                global_f = prompt_module.global_fisher
                 
-                self.model.prompt.global_merged_prompt.data = merged_p
-            
+                # 1. Tính Delta P
+                delta_p = now_task_p - global_p
+                
+                # 2. Tính hệ số lambda* = (Delta_P^T * Ft * Delta_P) / (Delta_P^T * (Ft + Fold) * Delta_P)
+                numerator = torch.sum((delta_p ** 2) * current_fisher)
+                denominator = torch.sum((delta_p ** 2) * (current_fisher + global_f))
+                
+                # Xử lý an toàn nếu mẫu số bằng 0 (tránh ZeroDivisionError)
+                if denominator.item() == 0:
+                    lambda_star = 0.5
+                else:
+                    lambda_star = (numerator / denominator).item()
+                    # Ép lambda_star phải nằm trong khoảng [0, 1]
+                    lambda_star = max(0.0, min(1.0, lambda_star))
+                # 3. Trộn Prompt với hệ số vừa tìm được
+                merged_p = prompt_module.merge_prompt(global_p, now_task_p, lambda_star)
+                prompt_module.global_merged_prompt.data = merged_p
+                
+                # 4. Cập nhật Tri thức Prior: F_mới = F_cũ + F_hiệntại
+                prompt_module.global_fisher.data = global_f + current_fisher
+            # ====================================================
+
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim

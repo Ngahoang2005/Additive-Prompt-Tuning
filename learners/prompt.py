@@ -1,3 +1,5 @@
+# prompt.py
+
 from __future__ import print_function
 import torch
 import models
@@ -83,6 +85,35 @@ class Prompt_Learner(NormalNN):
         if len(self.config['gpuid']) > 1:
             self.model = torch.nn.DataParallel(self.model, device_ids=self.config['gpuid'], output_device=self.config['gpuid'][0])
         return self
+    # === [BECAME ADAPTION] HÀM TÍNH ĐỘ CONG CỦA LOSS (FISHER) ===
+    def compute_fisher(self, dataloader):
+        self.model.eval() # Bật chế độ eval để tránh update BN/Dropout
+        
+        # Xử lý an toàn cho chế độ Multi-GPU (DataParallel)
+        prompt_module = self.model.module.prompt if hasattr(self.model, 'module') else self.model.prompt
+        fisher = torch.zeros_like(prompt_module.prompt_tokens.data)
+        
+        for i, (input, target, _) in enumerate(dataloader):
+            if self.gpu:
+                input = input.cuda()
+                target = target.cuda()
+            
+            self.optimizer.zero_grad()
+            
+            # Forward pass bình thường (không dùng autocast để gradient tính ra chính xác tuyệt đối)
+            logits = self.model(input, train=True)[:, :self.valid_out_dim]
+            logits[:, :self.last_valid_out_dim] = -float('inf')
+            
+            # Tính đạo hàm
+            loss = self.criterion(logits, target.long())
+            loss.backward()
+            
+            # Tích lũy bình phương đạo hàm vào Fisher: F = E[(nabla L)^2]
+            fisher += (prompt_module.prompt_tokens.grad.data ** 2) / len(dataloader)
+            
+        self.optimizer.zero_grad()
+        return fisher.detach()
+    # ==============================================================
 
 class APT_Learner(Prompt_Learner):
 

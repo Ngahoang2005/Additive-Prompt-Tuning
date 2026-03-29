@@ -164,6 +164,46 @@ class NormalNN(nn.Module):
                 self.log(f"   + Tử số (Sức kéo Task mới): {numerator.item():.6f}")
                 self.log(f"   + Mẫu số (Tổng lực cản):   {denominator.item():.6f}")
                 self.log(f"   => 🚀 LAMBDA TỐI ƯU (λ*):  {lambda_star:.4f}")
+                self.log("🔍 Đang quét thực nghiệm (Grid Search) để kiểm chứng λ*...")
+                
+                # Lưu tạm trạng thái để không làm hỏng mô hình
+                backup_global = prompt_module.global_merged_prompt.data.clone()
+                self.model.eval()
+                
+                test_lambdas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                # Thêm cả lambda_star vào list để so sánh trực tiếp
+                if lambda_star not in test_lambdas:
+                    test_lambdas.append(lambda_star)
+                test_lambdas.sort()
+                
+                for test_lbd in test_lambdas:
+                    # Trộn nháp
+                    temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
+                    prompt_module.global_merged_prompt.data = temp_merged
+                    
+                    # Tính tổng Loss trên tập Train hiện tại
+                    total_loss = 0.0
+                    total_samples = 0
+                    with torch.no_grad():
+                        for bx, by, _ in train_loader:
+                            if self.gpu:
+                                bx, by = bx.cuda(), by.cuda()
+                            
+                            # Nhớ dùng train=False để nó lấy cái global_merged_prompt vừa trộn nháp
+                            logits = self.model(bx, train=False)[:, :self.valid_out_dim]
+                            logits[:, :self.last_valid_out_dim] = -float('inf')
+                            loss_val = self.criterion(logits, by.long())
+                            
+                            total_loss += loss_val.item() * bx.size(0)
+                            total_samples += bx.size(0)
+                    
+                    avg_loss = total_loss / total_samples
+                    marker = " <=== (LÝ THUYẾT BECAME TÍNH RA)" if test_lbd == lambda_star else ""
+                    self.log(f"   * Thử λ = {test_lbd:.4f} | Training Loss thực tế: {avg_loss:.5f} {marker}")
+                
+                # Trả lại nguyên vẹn trạng thái cũ để đi tiếp
+                prompt_module.global_merged_prompt.data = backup_global
+                self.model.train()
                 self.log("-" * 40)
 
                 # 3. Trộn Prompt với hệ số vừa tìm được

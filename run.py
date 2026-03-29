@@ -13,7 +13,7 @@ import random
 from trainer import Trainer
 import re
 
-seed = 2
+seed = 1
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)

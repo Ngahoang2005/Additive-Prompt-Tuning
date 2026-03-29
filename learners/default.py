@@ -167,43 +167,59 @@ class NormalNN(nn.Module):
                 self.log("🔍 Đang quét thực nghiệm (Grid Search) để kiểm chứng λ*...")
                 
                 # Lưu tạm trạng thái để không làm hỏng mô hình
+                # =========================================================
+                # 🛠️ [ĐOẠN CODE KIỂM CHỨNG CUMULATIVE LOSS - CHUẨN BAYES]
+                self.log("🔍 Đang quét thực nghiệm (Grid Search) Cumulative Loss...")
+                
+                # Lưu tạm trạng thái để không làm hỏng mô hình
                 backup_global = prompt_module.global_merged_prompt.data.clone()
                 self.model.eval()
                 
                 test_lambdas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-                # Thêm cả lambda_star vào list để so sánh trực tiếp
+                # Thêm cả lambda_star vào list để so sánh
                 if lambda_star not in test_lambdas:
                     test_lambdas.append(lambda_star)
                 test_lambdas.sort()
                 
                 for test_lbd in test_lambdas:
-                    # Trộn nháp
+                    # 1. Trộn nháp Prompt với lambda đang test
                     temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
                     prompt_module.global_merged_prompt.data = temp_merged
                     
-                    # Tính tổng Loss trên tập Train hiện tại
-                    total_loss = 0.0
+                    # 2. Tính Hình Phạt Fisher (Đại diện cho độ TĂNG Loss của Task 1)
+                    # Tính ngoài vòng lặp dataloader vì nó không cần data thực tế
+                    penalty = 0.5 * torch.sum(global_f * (temp_merged - global_p)**2)
+                    
+                    # 3. Tính Loss của Task 2
+                    total_cumulative_loss = 0.0
                     total_samples = 0
+                    
                     with torch.no_grad():
                         for bx, by, _ in train_loader:
                             if self.gpu:
                                 bx, by = bx.cuda(), by.cuda()
                             
-                            # Nhớ dùng train=False để nó lấy cái global_merged_prompt vừa trộn nháp
+                            # Nhớ dùng train=False để lấy global_merged_prompt vừa trộn nháp
                             logits = self.model(bx, train=False)[:, :self.valid_out_dim]
                             logits[:, :self.last_valid_out_dim] = -float('inf')
-                            loss_val = self.criterion(logits, by.long())
                             
-                            total_loss += loss_val.item() * bx.size(0)
+                            # Tính Loss trên batch của Task 2
+                            loss_new_task = self.criterion(logits, by.long())
+                            
+                            # TỔNG LOSS = LOSS MỚI + HÌNH PHẠT CŨ
+                            loss_batch_cumulative = loss_new_task + penalty
+                            
+                            total_cumulative_loss += loss_batch_cumulative.item() * bx.size(0)
                             total_samples += bx.size(0)
                     
-                    avg_loss = total_loss / total_samples
-                    marker = " <=== (LÝ THUYẾT BECAME TÍNH RA)" if test_lbd == lambda_star else ""
-                    self.log(f"   * Thử λ = {test_lbd:.4f} | Training Loss thực tế: {avg_loss:.5f} {marker}")
+                    avg_cumulative_loss = total_cumulative_loss / total_samples
+                    marker = " <=== (ĐÁY LÝ THUYẾT BECAME)" if test_lbd == lambda_star else ""
+                    self.log(f"   * Thử λ = {test_lbd:.4f} | Cumulative Loss: {avg_cumulative_loss:.5f} {marker}")
                 
                 # Trả lại nguyên vẹn trạng thái cũ để đi tiếp
                 prompt_module.global_merged_prompt.data = backup_global
                 self.model.train()
+                # =========================================================
                 self.log("-" * 40)
 
                 # 3. Trộn Prompt với hệ số vừa tìm được

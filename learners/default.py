@@ -169,7 +169,7 @@ class NormalNN(nn.Module):
                 self.log("🔍 Đang quét thực nghiệm (Grid Search) để kiểm chứng λ*...")
                 
                 # =========================================================
-                # 🛠️ [THỰC NGHIỆM MÙ: TÍNH TRUE CUMULATIVE LOSS BẰNG DATA GỘP]
+                # 🛠️ [THỰC NGHIỆM: TRUE CUMULATIVE LOSS - FIX LỖI DATA CON TRỎ]
                 self.log("🔍 Đang quét thực nghiệm TRUE Cumulative Loss trên toàn bộ Data...")
                 
                 backup_global = prompt_module.global_merged_prompt.data.clone()
@@ -180,14 +180,18 @@ class NormalNN(nn.Module):
                     test_lambdas.append(lambda_star)
                 test_lambdas.sort()
 
-                # Gom Data: Lôi tất cả từ kho ra, cộng thêm Task hiện tại
-                current_task_info = {
-                    'loader': train_loader,
-                    'last_dim': self.last_valid_out_dim,
-                    'valid_dim': self.valid_out_dim
-                }
-                all_tasks = self.history_loaders + [current_task_info]
-                
+                # --- LÔI TOÀN BỘ DATA TỪ TRONG LƯU TRỮ (ARCHIVE) RA ---
+                # 1. Backup data hiện tại của Dataset để tí nữa trả lại
+                orig_data = train_dataset.data.copy()
+                orig_targets = train_dataset.targets.copy()
+
+                # 2. Ép dataset hiện tại nuốt toàn bộ data từ Task 0 đến Task t
+                train_dataset.data = np.concatenate([train_dataset.archive[s][0] for s in range(self.task_count + 1)], axis=0)
+                train_dataset.targets = np.concatenate([train_dataset.archive[s][1] for s in range(self.task_count + 1)], axis=0)
+
+                # 3. Tạo một cái Dataloader tạm thời chứa TẤT CẢ
+                cum_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.workers)
+
                 for test_lbd in test_lambdas:
                     temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
                     prompt_module.global_merged_prompt.data = temp_merged
@@ -196,30 +200,28 @@ class NormalNN(nn.Module):
                     total_samples = 0
                     
                     with torch.no_grad():
-                        for task_info in all_tasks:
-                            l_dim = task_info['last_dim']
-                            v_dim = task_info['valid_dim']
+                        for bx, by, _ in cum_loader:
+                            if self.gpu:
+                                bx, by = bx.cuda(), by.cuda()
                             
-                            for bx, by, _ in task_info['loader']:
-                                if self.gpu:
-                                    bx, by = bx.cuda(), by.cuda()
-                                
-                                # Tính Logits đúng số class của Task đó
-                                logits = self.model(bx, train=False)[:, :v_dim]
-                                
-                                # KHÔI PHỤC MẶT NẠ -INF: Để y hệt như lúc Train!
-                                if l_dim > 0:
-                                    logits[:, :l_dim] = -float('inf')
-                                
-                                loss_val = self.criterion(logits, by.long())
-                                
-                                total_cumulative_loss += loss_val.item() * bx.size(0)
-                                total_samples += bx.size(0)
+                            # Tính Logits trên toàn bộ class đã mở khóa
+                            logits = self.model(bx, train=False)[:, :self.valid_out_dim]
+                            
+                            # Tính Loss sòng phẳng cho tất cả Data
+                            loss_val = self.criterion(logits, by.long())
+                            
+                            total_cumulative_loss += loss_val.item() * bx.size(0)
+                            total_samples += bx.size(0)
                     
                     avg_cumulative_loss = total_cumulative_loss / total_samples
-                    marker = " <=== (ĐÁY LÝ THUYẾT BECAME)" if test_lbd == lambda_star else ""
+                    marker = " <=== (ĐÁY LÝ THUYẾT TOÁN HỌC)" if test_lbd == lambda_star else ""
                     self.log(f"   * Thử λ = {test_lbd:.4f} | TRUE Cum. Loss: {avg_cumulative_loss:.5f} {marker}")
-            
+                
+                # --- DỌN DẸP & TRẢ LẠI HIỆN TRƯỜNG ---
+                train_dataset.data = orig_data
+                train_dataset.targets = orig_targets
+       
+                # =========================================================
                 # Trả lại nguyên vẹn trạng thái cũ để đi tiếp
                 prompt_module.global_merged_prompt.data = backup_global
                 self.model.train()
@@ -243,12 +245,7 @@ class NormalNN(nn.Module):
         self.task_count += 1
         if self.memory_size > 0:
             train_dataset.update_coreset(self.memory_size, np.arange(self.last_valid_out_dim))
-        # === [BECAME ADAPTION] CẤT DATALOADER KÈM DIMENSION VÀO KHO ===
-        self.history_loaders.append({
-            'loader': train_loader,
-            'last_dim': self.last_valid_out_dim,
-            'valid_dim': self.valid_out_dim
-        })
+        self.history_loaders.append(train_loader)
         try:
             return batch_time.avg
         except:

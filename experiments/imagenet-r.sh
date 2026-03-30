@@ -5,7 +5,7 @@ DATASET=ImageNet_R
 N_CLASS=200
 
 # hard coded inputs
-GPUID='7'
+GPUID='0'  # <-- SỬA: Đổi về 0 vì Kaggle chỉ có 1 GPU
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
 OVERWRITE=0
@@ -14,14 +14,14 @@ OVERWRITE=0
 LR=0.003
 SCHEDULE=30
 EMA_COEFF=0.8
-SEED_LIST=(1 2 3)
+SEED_LIST=(1)
 
 # Set delay between experiments (in seconds)
-DELAY_BETWEEN_EXPERIMENTS=10  # Adjust this value as needed
+DELAY_BETWEEN_EXPERIMENTS=10
 
 # Create log directory
-LOG_DIR="logs"
-mkdir -p $LOG_DIR
+LOG_DIR="logs/${DATASET}"
+mkdir -p "$LOG_DIR"  # <-- SỬA: Tạo thư mục log đầy đủ đường dẫn
 
 for seed in "${SEED_LIST[@]}"
     do
@@ -30,7 +30,7 @@ for seed in "${SEED_LIST[@]}"
         mkdir -p $OUTDIR
 
         # Create unique log file name
-        LOG_FILE="${LOG_DIR}/${DATASET}/seed${seed}.log"
+        LOG_FILE="${LOG_DIR}/seed${seed}.log"
 
         echo "Starting experiment with seed=$seed"
         
@@ -46,6 +46,7 @@ for seed in "${SEED_LIST[@]}"
             --seed $seed \
             --ema_coeff $EMA_COEFF \
             --schedule $SCHEDULE \
+            --dataroot /kaggle/working/data \
             --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 &
 
         # Store the PID of the background process
@@ -65,11 +66,9 @@ for seed in "${SEED_LIST[@]}"
         
         echo "----------------------------------------"
         
-        # Add delay before next experiment
-        if [ $current -lt $total_experiments ]; then
-            echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
-            sleep $DELAY_BETWEEN_EXPERIMENTS
-        fi
+        # <-- SỬA: Xóa cái if lỗi biến rỗng đi, cho sleep luôn
+        echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
+        sleep $DELAY_BETWEEN_EXPERIMENTS
     done
 
 echo "All experiments completed!"

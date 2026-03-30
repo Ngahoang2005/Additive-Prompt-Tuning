@@ -180,8 +180,13 @@ class NormalNN(nn.Module):
                     test_lambdas.append(lambda_star)
                 test_lambdas.sort()
 
-                # Gom Data: Lôi tất cả Dataloader từ Task 1 đến Task hiện tại ra
-                all_loaders = self.history_loaders + [train_loader]
+                # Gom Data: Lôi tất cả từ kho ra, cộng thêm Task hiện tại
+                current_task_info = {
+                    'loader': train_loader,
+                    'last_dim': self.last_valid_out_dim,
+                    'valid_dim': self.valid_out_dim
+                }
+                all_tasks = self.history_loaders + [current_task_info]
                 
                 for test_lbd in test_lambdas:
                     temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
@@ -191,17 +196,20 @@ class NormalNN(nn.Module):
                     total_samples = 0
                     
                     with torch.no_grad():
-                        for loader in all_loaders:
-                            for bx, by, _ in loader:
+                        for task_info in all_tasks:
+                            l_dim = task_info['last_dim']
+                            v_dim = task_info['valid_dim']
+                            
+                            for bx, by, _ in task_info['loader']:
                                 if self.gpu:
                                     bx, by = bx.cuda(), by.cuda()
                                 
-                                # Tính Logits trên TOÀN BỘ các class đã học
-                                logits = self.model(bx, train=False)[:, :self.valid_out_dim]
+                                # Tính Logits đúng số class của Task đó
+                                logits = self.model(bx, train=False)[:, :v_dim]
                                 
-                                # ⚠️ LƯU Ý QUAN TRỌNG: Ở đây ta KHÔNG DÙNG lệnh ép -inf 
-                                # (logits[:, :self.last_valid_out_dim] = -float('inf')) 
-                                # Vì nếu ép, nó sẽ chém mất xác suất của Task 1 khi đang chấm điểm Task 1!
+                                # KHÔI PHỤC MẶT NẠ -INF: Để y hệt như lúc Train!
+                                if l_dim > 0:
+                                    logits[:, :l_dim] = -float('inf')
                                 
                                 loss_val = self.criterion(logits, by.long())
                                 
@@ -235,7 +243,12 @@ class NormalNN(nn.Module):
         self.task_count += 1
         if self.memory_size > 0:
             train_dataset.update_coreset(self.memory_size, np.arange(self.last_valid_out_dim))
-        self.history_loaders.append(train_loader)
+        # === [BECAME ADAPTION] CẤT DATALOADER KÈM DIMENSION VÀO KHO ===
+        self.history_loaders.append({
+            'loader': train_loader,
+            'last_dim': self.last_valid_out_dim,
+            'valid_dim': self.valid_out_dim
+        })
         try:
             return batch_time.avg
         except:

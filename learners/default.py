@@ -190,7 +190,7 @@ class NormalNN(nn.Module):
                 train_dataset.targets = np.concatenate([train_dataset.archive[s][1] for s in range(self.task_count + 1)], axis=0)
 
                 # 3. Tạo một cái Dataloader tạm thời chứa TẤT CẢ
-                cum_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.workers)
+                cum_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
 
                 for test_lbd in test_lambdas:
                     temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)

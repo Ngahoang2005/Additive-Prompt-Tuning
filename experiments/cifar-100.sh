@@ -12,7 +12,7 @@ OVERWRITE=0
 
 # hyperparameter arrays
 LR=0.004
-SCHEDULE=30
+SCHEDULE=20
 EMA_COEFF=0.7
 SEED_LIST=(2)
 

@@ -12,7 +12,7 @@ OVERWRITE=0  # <-- Đã đổi thành 1 để ép nó train lại từ đầu, b
 
 # hyperparameter arrays
 LR=0.003
-SCHEDULE=2
+SCHEDULE=30
 EMA_COEFF=0.8
 SEED_LIST=(1)
 

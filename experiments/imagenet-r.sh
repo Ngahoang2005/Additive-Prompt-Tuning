@@ -5,10 +5,10 @@ DATASET=ImageNet_R
 N_CLASS=200
 
 # hard coded inputs
-GPUID='0'  # <-- SỬA: Đổi về 0 vì Kaggle chỉ có 1 GPU
+GPUID='0'  
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
-OVERWRITE=0
+OVERWRITE=1  # <-- Đã đổi thành 1 để ép nó train lại từ đầu, bỏ qua check file cũ
 
 # hyperparameter arrays
 LR=0.003
@@ -21,7 +21,7 @@ DELAY_BETWEEN_EXPERIMENTS=10
 
 # Create log directory
 LOG_DIR="logs/${DATASET}"
-mkdir -p "$LOG_DIR"  # <-- SỬA: Tạo thư mục log đầy đủ đường dẫn
+mkdir -p "$LOG_DIR"  
 
 for seed in "${SEED_LIST[@]}"
     do
@@ -34,7 +34,11 @@ for seed in "${SEED_LIST[@]}"
 
         echo "Starting experiment with seed=$seed"
         
+        # ĐÃ THÊM ĐẦY ĐỦ CÁC FLAGS ÉP BUỘC Ở ĐÂY:
         nohup python -u run.py \
+            --dataset $DATASET \
+            --first_split_size 20 \
+            --other_split_size 20 \
             --config $CONFIG \
             --gpuid $GPUID \
             --repeat $REPEAT \
@@ -65,8 +69,6 @@ for seed in "${SEED_LIST[@]}"
         rm -rf ${OUTDIR}/models
         
         echo "----------------------------------------"
-        
-        # <-- SỬA: Xóa cái if lỗi biến rỗng đi, cho sleep luôn
         echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
         sleep $DELAY_BETWEEN_EXPERIMENTS
     done

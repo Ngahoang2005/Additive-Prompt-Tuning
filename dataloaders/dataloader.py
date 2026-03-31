@@ -317,6 +317,24 @@ class iIMAGENET_R(iDataset):
         self.data = data_config['data']
         self.targets = data_config['targets']
 
+    # def __getitem__(self, index, simple = False):
+    #     """
+    #     Args:
+    #         index (int): Index
+    #     Returns:
+    #         tuple: (image, target) where target is index of the target class
+    #     """
+    #     img_path, target = self.data[index], self.targets[index]
+    #     img = jpg_image_to_array(img_path)
+
+    #     # doing this so that it is consistent with all other datasets
+    #     # to return a PIL Image
+    #     img = Image.fromarray(img)
+
+    #     if self.transform is not None:
+    #         img = self.transform(img)
+
+    #     return img, self.class_mapping[target], self.t
     def __getitem__(self, index, simple = False):
         """
         Args:
@@ -325,7 +343,21 @@ class iIMAGENET_R(iDataset):
             tuple: (image, target) where target is index of the target class
         """
         img_path, target = self.data[index], self.targets[index]
-        img = jpg_image_to_array(img_path)
+        
+        # --- [BẮT ĐẦU FIX LỖI ĐƯỜNG DẪN ẢNH] ---
+        # 1. Ép kiểu về string chuẩn (tránh cái np.str_ củ chuối)
+        img_path_str = str(img_path)
+        
+        # 2. Chém bỏ cái tiền tố 'data/' bị hardcode trong file YAML
+        if img_path_str.startswith('data/'):
+            img_path_str = img_path_str[len('data/'):]
+            
+        # 3. Ghép nối tử tế với thư mục gốc tự định nghĩa (self.root = --dataroot)
+        real_img_path = os.path.join(self.root, img_path_str)
+        # --- [KẾT THÚC FIX LỖI] ---
+
+        # Truyền đường dẫn THẬT vào hàm đọc ảnh
+        img = jpg_image_to_array(real_img_path)
 
         # doing this so that it is consistent with all other datasets
         # to return a PIL Image
@@ -335,7 +367,6 @@ class iIMAGENET_R(iDataset):
             img = self.transform(img)
 
         return img, self.class_mapping[target], self.t
-
     def parse_archives(self) -> None:
         if not check_integrity(os.path.join(self.root, META_FILE)):
             parse_devkit_archive(self.root)

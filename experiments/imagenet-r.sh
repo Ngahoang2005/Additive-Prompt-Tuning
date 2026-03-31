@@ -12,7 +12,7 @@ OVERWRITE=0 # <-- ĐÃ ĐỔI THÀNH 1 THẬT NHÉ, ĐÉO ĐÙA NỮA!
 
 # hyperparameter arrays
 LR=0.003
-SCHEDULE=30
+SCHEDULE=2
 EMA_COEFF=0.8
 SEED_LIST=(1)
 

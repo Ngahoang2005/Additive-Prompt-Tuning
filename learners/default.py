@@ -166,65 +166,65 @@ class NormalNN(nn.Module):
                 self.log(f"   + Tử số (Sức kéo Task mới): {numerator.item():.6f}")
                 self.log(f"   + Mẫu số (Tổng lực cản):   {denominator.item():.6f}")
                 self.log(f"   => 🚀 LAMBDA TỐI ƯU (λ*):  {lambda_star:.4f}")
-                self.log("🔍 Đang quét thực nghiệm (Grid Search) để kiểm chứng λ*...")
+                # self.log("🔍 Đang quét thực nghiệm (Grid Search) để kiểm chứng λ*...")
                 
-                # =========================================================
-                # 🛠️ [THỰC NGHIỆM: TRUE CUMULATIVE LOSS - FIX LỖI DATA CON TRỎ]
-                self.log("🔍 Đang quét thực nghiệm TRUE Cumulative Loss trên toàn bộ Data...")
+                # # =========================================================
+                # # 🛠️ [THỰC NGHIỆM: TRUE CUMULATIVE LOSS - FIX LỖI DATA CON TRỎ]
+                # self.log("🔍 Đang quét thực nghiệm TRUE Cumulative Loss trên toàn bộ Data...")
                 
-                backup_global = prompt_module.global_merged_prompt.data.clone()
-                self.model.eval()
+                # backup_global = prompt_module.global_merged_prompt.data.clone()
+                # self.model.eval()
                 
-                test_lambdas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-                if lambda_star not in test_lambdas:
-                    test_lambdas.append(lambda_star)
-                test_lambdas.sort()
+                # test_lambdas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                # if lambda_star not in test_lambdas:
+                #     test_lambdas.append(lambda_star)
+                # test_lambdas.sort()
 
-                # --- LÔI TOÀN BỘ DATA TỪ TRONG LƯU TRỮ (ARCHIVE) RA ---
-                # 1. Backup data hiện tại của Dataset để tí nữa trả lại
-                orig_data = train_dataset.data.copy()
-                orig_targets = train_dataset.targets.copy()
+                # # --- LÔI TOÀN BỘ DATA TỪ TRONG LƯU TRỮ (ARCHIVE) RA ---
+                # # 1. Backup data hiện tại của Dataset để tí nữa trả lại
+                # orig_data = train_dataset.data.copy()
+                # orig_targets = train_dataset.targets.copy()
 
-                # 2. Ép dataset hiện tại nuốt toàn bộ data từ Task 0 đến Task t
-                train_dataset.data = np.concatenate([train_dataset.archive[s][0] for s in range(self.task_count + 1)], axis=0)
-                train_dataset.targets = np.concatenate([train_dataset.archive[s][1] for s in range(self.task_count + 1)], axis=0)
+                # # 2. Ép dataset hiện tại nuốt toàn bộ data từ Task 0 đến Task t
+                # train_dataset.data = np.concatenate([train_dataset.archive[s][0] for s in range(self.task_count + 1)], axis=0)
+                # train_dataset.targets = np.concatenate([train_dataset.archive[s][1] for s in range(self.task_count + 1)], axis=0)
 
-                # 3. Tạo một cái Dataloader tạm thời chứa TẤT CẢ
-                cum_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+                # # 3. Tạo một cái Dataloader tạm thời chứa TẤT CẢ
+                # cum_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
 
-                for test_lbd in test_lambdas:
-                    temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
-                    prompt_module.global_merged_prompt.data = temp_merged
+                # for test_lbd in test_lambdas:
+                #     temp_merged = prompt_module.merge_prompt(global_p, now_task_p, test_lbd)
+                #     prompt_module.global_merged_prompt.data = temp_merged
                     
-                    total_cumulative_loss = 0.0
-                    total_samples = 0
+                #     total_cumulative_loss = 0.0
+                #     total_samples = 0
                     
-                    with torch.no_grad():
-                        for bx, by, _ in cum_loader:
-                            if self.gpu:
-                                bx, by = bx.cuda(), by.cuda()
+                #     with torch.no_grad():
+                #         for bx, by, _ in cum_loader:
+                #             if self.gpu:
+                #                 bx, by = bx.cuda(), by.cuda()
                             
-                            # Tính Logits trên toàn bộ class đã mở khóa
-                            logits = self.model(bx, train=False)[:, :self.valid_out_dim]
+                #             # Tính Logits trên toàn bộ class đã mở khóa
+                #             logits = self.model(bx, train=False)[:, :self.valid_out_dim]
                             
-                            # Tính Loss sòng phẳng cho tất cả Data
-                            loss_val = self.criterion(logits, by.long())
+                #             # Tính Loss sòng phẳng cho tất cả Data
+                #             loss_val = self.criterion(logits, by.long())
                             
-                            total_cumulative_loss += loss_val.item() * bx.size(0)
-                            total_samples += bx.size(0)
+                #             total_cumulative_loss += loss_val.item() * bx.size(0)
+                #             total_samples += bx.size(0)
                     
-                    avg_cumulative_loss = total_cumulative_loss / total_samples
-                    marker = " <=== (ĐÁY LÝ THUYẾT TOÁN HỌC)" if test_lbd == lambda_star else ""
-                    self.log(f"   * Thử λ = {test_lbd:.4f} | TRUE Cum. Loss: {avg_cumulative_loss:.5f} {marker}")
+                #     avg_cumulative_loss = total_cumulative_loss / total_samples
+                #     marker = " <=== (ĐÁY LÝ THUYẾT TOÁN HỌC)" if test_lbd == lambda_star else ""
+                #     self.log(f"   * Thử λ = {test_lbd:.4f} | TRUE Cum. Loss: {avg_cumulative_loss:.5f} {marker}")
                 
-                # --- DỌN DẸP & TRẢ LẠI HIỆN TRƯỜNG ---
-                train_dataset.data = orig_data
-                train_dataset.targets = orig_targets
+                # # --- DỌN DẸP & TRẢ LẠI HIỆN TRƯỜNG ---
+                # train_dataset.data = orig_data
+                # train_dataset.targets = orig_targets
        
-                # =========================================================
-                # Trả lại nguyên vẹn trạng thái cũ để đi tiếp
-                prompt_module.global_merged_prompt.data = backup_global
-                self.model.train()
+                # # =========================================================
+                # # Trả lại nguyên vẹn trạng thái cũ để đi tiếp
+                # prompt_module.global_merged_prompt.data = backup_global
+                # self.model.train()
                 # =========================================================
                 self.log("-" * 40)
 

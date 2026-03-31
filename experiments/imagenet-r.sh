@@ -8,7 +8,7 @@ N_CLASS=200
 GPUID='0'  
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
-OVERWRITE=1  # <-- Đã đổi thành 1 để ép nó train lại từ đầu, bỏ qua check file cũ
+OVERWRITE=0  # <-- Đã đổi thành 1 để ép nó train lại từ đầu, bỏ qua check file cũ
 
 # hyperparameter arrays
 LR=0.003
@@ -51,13 +51,8 @@ for seed in "${SEED_LIST[@]}"
             --ema_coeff $EMA_COEFF \
             --schedule $SCHEDULE \
             --dataroot /kaggle/working/data \
-            --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 &
+            --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 | tee "$LOG_FILE"
 
-        # Store the PID of the background process
-        PID=$!
-        
-        # Wait for process to complete
-        wait $PID
         
         # Check if process completed successfully
         if [ $? -eq 0 ]; then

@@ -100,7 +100,18 @@ if __name__ == '__main__':
     args = get_args(sys.argv[1:])
     print(args)
     # determinstic backend
-    torch.backends.cudnn.deterministic=True
+    # --- [BẮT ĐẦU FIX: ÉP SEED ĐỘNG TỪ BASH SCRIPT] ---
+    import random
+    import numpy as np
+    import torch
+    
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # --- [KẾT THÚC FIX] ---
 
     # duplicate output stream to output file
     if not os.path.exists(args.log_dir): os.makedirs(args.log_dir)

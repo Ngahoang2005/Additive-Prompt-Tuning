@@ -1,4 +1,19 @@
 #!/bin/bash
+mkdir -p /kaggle/working/data
+if [ ! -d "/kaggle/working/data/CUB_200_2011" ]; then
+    echo "Đang tải CUB200 dataset từ server Caltech (khoảng 1.1GB)..."
+    wget -q https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz -P /kaggle/working/data/
+    
+    echo "Đang giải nén..."
+    tar -xzf /kaggle/working/data/CUB_200_2011.tgz -C /kaggle/working/data/
+    
+    echo "Dọn dẹp file nén..."
+    rm /kaggle/working/data/CUB_200_2011.tgz
+    echo "Tải Data CUB200 xong!"
+else
+    echo "Data CUB200 đã tồn tại, bỏ qua bước tải."
+fi
+echo "----------------------------------------"
 
 # experiment settings
 DATASET=CUB200

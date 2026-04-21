@@ -1,3 +1,4 @@
+# zoo.py
 import itertools
 import torch
 import torch.nn as nn
@@ -32,7 +33,8 @@ class APT(nn.Module):
         self.prompt_tokens = create_prompt_with_init(12*2, emb_d) 
         global_merged_prompt = torch.zeros(12*2, emb_d).cuda()
         self.register_buffer('global_merged_prompt', global_merged_prompt.clone().detach()) 
-
+        self.expert_prompts = nn.ParameterDict() 
+        self.prototypes = {}
         trunc_normal_(self.prompt_tokens, std=0.02)
 
         for i in range(12):
@@ -56,14 +58,17 @@ class APT(nn.Module):
 
         prompt_groups = self.prompt_tokens
         
-        if train or not self.merge_flag:
-            P_root_k = prompt_groups[l*2:l*2+1].reshape(12,1,64).expand(B,12,1,64)
-            P_root_v = prompt_groups[l*2+1:l*2+2].reshape(12,1,64).expand(B,12,1,64)
-        elif not train and self.merge_flag:
-            P_root_k = self.global_merged_prompt[l*2:l*2+1].reshape(12,1,64).expand(B,12,1,64)
-            P_root_v = self.global_merged_prompt[l*2+1:l*2+2].reshape(12,1,64).expand(B,12,1,64)
+        if train:
+            prompt_groups = self.prompt_tokens
+        elif getattr(self, 'expert_id_inference', None) is not None:
+            prompt_groups = self.expert_prompts[str(self.expert_id_inference)]
+        elif getattr(self, 'use_merge_inference', False) or (not train and self.merge_flag):
+            prompt_groups = self.global_merged_prompt
         else:
-            raise ValueError("merge flag and mode err")
+            prompt_groups = self.prompt_tokens
+
+        P_root_k = prompt_groups[l*2:l*2+1].reshape(12,1,64).expand(B,12,1,64)
+        P_root_v = prompt_groups[l*2+1:l*2+2].reshape(12,1,64).expand(B,12,1,64)
 
         P_k = torch.cat((P_root_k, torch.zeros((B,12,196,64),device =x_block.device)),dim=-2)
         P_v = torch.cat((P_root_v, torch.zeros((B,12,196,64),device =x_block.device)),dim=-2)
@@ -152,10 +157,19 @@ class ViTZoo(nn.Module):
 
         elif method == "max":
             return attn_matrix.max(dim=dim)[0]
- 
-    def forward(self, x, train=False):
+    def extract_cls_features(self,x, use_merge = True):
+        if self.prompt_flag == 'apt':
+            self.prompt.use_merge_inference = use_merge
+            self.prompt.expert_id_inference = None
+            out = self.feat(x, prompt=self.prompt, train=False)
+            return out[:,0,:]
+        return None
+
+    def forward(self, x, train=False, use_merge=False, expert_id=None):
         if self.prompt is not None:
             if self.prompt_flag == 'apt':
+                self.prompt.use_merge_inference = use_merge
+                self.prompt.expert_id_inference = expert_id
                 out = self.feat(x, prompt=self.prompt, train=train)
                 out =  out[:,0,:]
             else: 

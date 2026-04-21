@@ -1,3 +1,5 @@
+#vit.py
+
 '''
  * Based on vit from blip code base
  * https://github.com/salesforce/BLIP
@@ -70,8 +72,8 @@ class Attention(nn.Module):
     def forward(self, x, register_hook=False, prompt=None,layer=-1):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
-
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        #make torchscript happy (cannot use tensor as tuple)
         if prompt is not None:
             if type(prompt) is list and len(prompt) == 2:
                 pk, pv = prompt

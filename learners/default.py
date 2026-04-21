@@ -1,3 +1,4 @@
+#dèualt.py
 from __future__ import print_function
 import math
 import torch
@@ -145,6 +146,32 @@ class NormalNN(nn.Module):
                 
                 self.model.prompt.global_merged_prompt.data = merged_p
             
+            self.log(f'Extracting Prototypes for Task {self.task_count}...')
+            self.model.eval()
+            
+            curr_expert = nn.Parameter(self.model.prompt.prompt_tokens.clone().detach())
+            curr_expert.requires_grad = False
+            self.model.prompt.expert_prompts[str(self.task_count)] = curr_expert
+            
+            all_features = []
+            with torch.no_grad():
+                for x_train, _, _ in train_loader:
+                    if self.gpu: x_train = x_train.cuda()
+                    feat = self.model.extract_cls_features(x_train, use_merge=True)
+                    all_features.append(feat)
+            
+            all_features = torch.cat(all_features, dim=0)
+            
+            mu = torch.mean(all_features, dim=0)
+            centered = all_features - mu
+            cov = torch.matmul(centered.t(), centered) / (all_features.shape[0] - 1)
+            cov = cov + 1e-4 * torch.eye(cov.shape[0]).cuda() 
+            
+            self.model.prompt.prototypes[self.task_count] = {
+                'mean': mu,
+                'cov_inv': torch.linalg.inv(cov)
+            }
+            self.log('Prototype Extraction Completed!')
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim
@@ -196,10 +223,67 @@ class NormalNN(nn.Module):
             if self.gpu:
                 with torch.no_grad():
                     input = input.cuda()
+
                     target = target.cuda()
             if task_in is None:
-                output = model.forward(input)[:, :self.valid_out_dim]
+                B = input.shape[0]
+                query = model.extract_cls_features(input, use_merge=True)
+                min_distances = torch.full((B,), float('inf')).cuda()
+                best_task_preds = torch.zeros(B, dtype=torch.long).cuda()
+                for t in range(self.task_count): 
+                    if t not in getattr(model.prompt, 'prototypes', {}): continue
+                    mu = model.prompt.prototypes[t]['mean']
+                    cov_inv = model.prompt.prototypes[t]['cov_inv']
+                    
+                    diff = query - mu
+                    left_term = torch.matmul(diff, cov_inv)
+                    dist = torch.sum(left_term * diff, dim=1)
+                    
+                    better_mask = dist < min_distances
+                    min_distances[better_mask] = dist[better_mask]
+                    best_task_preds[better_mask] = t
+
+                if not hasattr(self, 'routing_correct'):
+                    self.routing_correct, self.routing_total = 0, 0
+                    self.all_distances, self.all_routes_correct = [], []
+                    
+                self.routing_correct += (best_task_preds == task).sum().item()
+                self.routing_total += B
+                self.all_distances.extend(min_distances.cpu().numpy())
+                self.all_routes_correct.extend((best_task_preds == task).cpu().numpy())
+                
+                # Tính Ensemble Logit
+                logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
+                logits_expert = torch.zeros_like(logits_merge)
+                
+                for t in range(self.task_count):
+                    idx = (best_task_preds == t).nonzero(as_tuple=True)[0]
+                    if len(idx) > 0:
+                        logits_expert[idx] = model.forward(input[idx], expert_id=t)[:, :self.valid_out_dim]
+
+                output = logits_merge + logits_expert 
                 acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+                
+                # Đóng gói và lưu đồ thị vào cuối epoch
+                if i == len(dataloader) - 1 and self.routing_total > 0:
+                    self.log(f'>>> Task Routing Accuracy: {self.routing_correct/self.routing_total * 100:.2f}%')
+                    try:
+                        dist_arr = np.array(self.all_distances)
+                        corr_arr = np.array(self.all_routes_correct)
+                        plt.figure(figsize=(8, 6))
+                        plt.hist(dist_arr[corr_arr], alpha=0.5, label='Correct Route', color='green', bins=20)
+                        plt.hist(dist_arr[~corr_arr], alpha=0.5, label='Wrong Route', color='red', bins=20)
+                        plt.title(f'Mahalanobis Distance Distribution (Task {self.task_count})')
+                        plt.xlabel('Distance')
+                        plt.legend()
+                        os.makedirs('logs/cifar-100', exist_ok=True)
+                        plt.savefig(f'logs/cifar-100/distance_dist_task_{self.task_count}.png')
+                        plt.close()
+                    except Exception as e:
+                        self.log(f"Plot failed: {e}")
+                        
+                    self.routing_correct, self.routing_total = 0, 0
+                    self.all_distances, self.all_routes_correct = [], []
             else:
                 mask = target >= task_in[0]
                 mask_ind = mask.nonzero().view(-1)

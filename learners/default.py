@@ -247,7 +247,7 @@ class NormalNN(nn.Module):
                 # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK (Class -> Task)
                 if not hasattr(self, 'class_to_task_tensor'):
                     mapping = torch.zeros(self.out_dim, dtype=torch.long)
-                    for t_idx, class_list in enumerate(self.tasks_logits):
+                    for t_idx, class_list in enumerate(self.tasks):
                         for c in class_list:
                             mapping[c] = t_idx
                     self.class_to_task_tensor = mapping.cuda() # Đẩy lên GPU
@@ -285,7 +285,7 @@ class NormalNN(nn.Module):
                 topk_tasks = self.class_to_task_tensor[topk_classes] # Shape: [B, K]
                 
                 # Gộp trọng số cho các Task (scatter_add_)
-                task_weights = torch.zeros(B, len(self.tasks_logits)).cuda()
+                task_weights = torch.zeros(B, len(self.tasks)).cuda()
                 task_weights.scatter_add_(1, topk_tasks, weights)
                 
                 # Tracking Accuracy (Dựa vào Task của class Top 1)

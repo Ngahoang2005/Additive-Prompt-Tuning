@@ -17,60 +17,53 @@ EMA_COEFF=0.8
 SEED_LIST=(1 2 3)
 
 # Set delay between experiments (in seconds)
-DELAY_BETWEEN_EXPERIMENTS=10  # Adjust this value as needed
+DELAY_BETWEEN_EXPERIMENTS=10
 
-# Create log directory
-LOG_DIR="logs"
-mkdir -p $LOG_DIR
+# FIX: Tạo thư mục log con một cách chuẩn xác
+LOG_DIR="logs/${DATASET}"
+mkdir -p "$LOG_DIR"
 
 for seed in "${SEED_LIST[@]}"
-    do
-        # save directory
-        OUTDIR="./checkpoints/${DATASET}/seed${seed}"
-        mkdir -p $OUTDIR
+do
+    # save directory
+    OUTDIR="./checkpoints/${DATASET}/seed${seed}"
+    mkdir -p $OUTDIR
 
-        # Create unique log file name
-        LOG_FILE="${LOG_DIR}/${DATASET}/seed${seed}.log"
+    # Create unique log file name
+    LOG_FILE="${LOG_DIR}/seed${seed}.log"
 
-        echo "Starting experiment with seed=$seed"
-        
-        nohup python -u run.py \
-            --config $CONFIG \
-            --gpuid $GPUID \
-            --repeat $REPEAT \
-            --overwrite $OVERWRITE \
-            --learner_type prompt \
-            --learner_name APT_Learner \
-            --prompt_param 0.01 \
-            --lr $LR \
-            --seed $seed \
-            --ema_coeff $EMA_COEFF \
-            --schedule $SCHEDULE \
-            --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 &
+    echo "Starting experiment with seed=$seed"
+    
+    # FIX: Bỏ nohup, dùng tee để hiển thị ra màn hình giống CIFAR
+    # FIX: Thêm --workers 0 để chống kẹt luồng (deadlock)
+    python -u run.py \
+        --config $CONFIG \
+        --gpuid $GPUID \
+        --repeat $REPEAT \
+        --overwrite $OVERWRITE \
+        --learner_type prompt \
+        --learner_name APT_Learner \
+        --prompt_param 0.01 \
+        --lr $LR \
+        --seed $seed \
+        --ema_coeff $EMA_COEFF \
+        --schedule $SCHEDULE \
+        --workers 4 \
+        --log_dir ${OUTDIR} 2>&1 | tee "$LOG_FILE"
 
-        # Store the PID of the background process
-        PID=$!
-        
-        # Wait for process to complete
-        wait $PID
-        
-        # Check if process completed successfully
-        if [ $? -eq 0 ]; then
-            echo "Experiment completed successfully"
-        else
-            echo "Experiment failed"
-        fi
+    # Check if process completed successfully
+    if [ $? -eq 0 ]; then
+        echo "Experiment completed successfully"
+    else
+        echo "Experiment failed"
+    fi
 
-        rm -rf ${OUTDIR}/models
-        
-        echo "----------------------------------------"
-        
-        # Add delay before next experiment
-        if [ $current -lt $total_experiments ]; then
-            echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
-            sleep $DELAY_BETWEEN_EXPERIMENTS
-        fi
-    done
+    rm -rf ${OUTDIR}/models
+    
+    echo "----------------------------------------"
+    echo "Waiting for $DELAY_BETWEEN_EXPERIMENTS seconds before next experiment..."
+    sleep $DELAY_BETWEEN_EXPERIMENTS
+done
 
 echo "All experiments completed!"
 exit 0

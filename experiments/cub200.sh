@@ -12,9 +12,9 @@ OVERWRITE=0
 
 # hyperparameter arrays
 LR=0.02
-SCHEDULE=2
+SCHEDULE=25
 EMA_COEFF=0.7
-SEED_LIST=(1 2 3)
+SEED_LIST=(1)
 
 # Set delay between experiments (in seconds)
 DELAY_BETWEEN_EXPERIMENTS=10  

@@ -48,7 +48,7 @@ do
         --seed $seed \
         --ema_coeff $EMA_COEFF \
         --schedule $SCHEDULE \
-        --workers 4 \
+    
         --log_dir ${OUTDIR} 2>&1 | tee "$LOG_FILE"
 
     # Check if process completed successfully

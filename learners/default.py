@@ -247,11 +247,10 @@ class NormalNN(nn.Module):
                     self.routing_correct, self.routing_total = 0, 0
                     self.all_distances, self.all_routes_correct = [], []
                     
-                self.routing_correct += (best_task_preds == task).sum().item()
+                self.routing_correct += (best_task_preds == task.cuda()).sum().item()
                 self.routing_total += B
                 self.all_distances.extend(min_distances.cpu().numpy())
-                self.all_routes_correct.extend((best_task_preds == task).cpu().numpy())
-                
+                self.all_routes_correct.extend((best_task_preds == task.cuda()).cpu().numpy())
                 # Tính Ensemble Logit
                 logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
                 logits_expert = torch.zeros_like(logits_merge)

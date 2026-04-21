@@ -352,6 +352,15 @@ class NormalNN(nn.Module):
             model_state[key] = model_state[key].cpu()
         self.log('=> Saving class model to:', filename)
         torch.save(model_state, filename + 'class.pth')
+        
+        # --- BỔ SUNG LƯU PROTOTYPES VÀ EXPERTS ---
+        custom_data = {
+            'prototypes': getattr(self.model.prompt, 'prototypes', {}),
+            'expert_prompts': {k: v.cpu() for k, v in getattr(self.model.prompt, 'expert_prompts', {}).items()}
+        }
+        torch.save(custom_data, filename + 'custom_data.pth')
+        # --- KẾT THÚC BỔ SUNG ---
+        
         self.log('=> Save Done')
 
     def load_model(self, filename):

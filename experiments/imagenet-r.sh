@@ -5,7 +5,7 @@ DATASET=ImageNet_R
 N_CLASS=200
 
 # hard coded inputs
-GPUID='7'
+GPUID='0'
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
 OVERWRITE=0

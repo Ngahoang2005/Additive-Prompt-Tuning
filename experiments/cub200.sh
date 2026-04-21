@@ -12,7 +12,7 @@ OVERWRITE=0
 
 # hyperparameter arrays
 LR=0.02
-SCHEDULE=5
+SCHEDULE=25
 EMA_COEFF=0.7
 SEED_LIST=(1 2 3)
 
@@ -48,7 +48,6 @@ do
         --seed $seed \
         --ema_coeff $EMA_COEFF \
         --schedule $SCHEDULE \
-   
         --log_dir ${OUTDIR} 2>&1 | tee "$LOG_FILE"
         
     # Check if process completed successfully

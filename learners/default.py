@@ -154,24 +154,38 @@ class NormalNN(nn.Module):
             self.model.prompt.expert_prompts[str(self.task_count)] = curr_expert
             
             all_features = []
+            all_labels = [] # Bổ sung list lưu nhãn
+            
             with torch.no_grad():
-                for x_train, _, _ in train_loader:
+                # CHÚ Ý: Lấy thêm y_train để chia class
+                for x_train, y_train, _ in train_loader:
                     if self.gpu: x_train = x_train.cuda()
                     feat = self.model.extract_cls_features(x_train, use_merge=True)
-                    all_features.append(feat)
+                    all_features.append(feat.cpu())
+                    all_labels.append(y_train.cpu()) 
             
             all_features = torch.cat(all_features, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
             
-            mu = torch.mean(all_features, dim=0)
-            centered = all_features - mu
-            cov = torch.matmul(centered.t(), centered) / (all_features.shape[0] - 1)
-            cov = cov + 1e-4 * torch.eye(cov.shape[0]).cuda() 
+            # CHIA THEO CLASS ĐỂ TÍNH PROTOTYPE
+            unique_classes = torch.unique(all_labels)
+            for c in unique_classes:
+                c_idx = c.item()
+                c_feats = all_features[all_labels == c] # Lọc feature của riêng class này
+                
+                mu = torch.mean(c_feats, dim=0)
+                centered = c_feats - mu
+                cov = torch.matmul(centered.t(), centered) / (c_feats.shape[0] - 1)
+                
+                # Dùng PINV (Nghịch đảo giả) để chống sập nếu class có quá ít ảnh
+                cov_inv = torch.linalg.pinv(cov + 1e-4 * torch.eye(cov.shape[0])) 
+                
+                self.model.prompt.prototypes[c_idx] = {
+                    'mean': mu.cuda(),
+                    'cov_inv': cov_inv.cuda()
+                }
             
-            self.model.prompt.prototypes[self.task_count] = {
-                'mean': mu,
-                'cov_inv': torch.linalg.inv(cov)
-            }
-            self.log('Prototype Extraction Completed!')
+            self.log(f'Extracted {len(unique_classes)} class prototypes!')
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim
@@ -227,62 +241,84 @@ class NormalNN(nn.Module):
                     target = target.cuda()
             if task_in is None:
                 B = input.shape[0]
+                K = 3
                 query = model.extract_cls_features(input, use_merge=True)
-                min_distances = torch.full((B,), float('inf')).cuda()
-                best_task_preds = torch.zeros(B, dtype=torch.long).cuda()
-                for t in range(self.task_count): 
-                    if t not in getattr(model.prompt, 'prototypes', {}): continue
-                    mu = model.prompt.prototypes[t]['mean']
-                    cov_inv = model.prompt.prototypes[t]['cov_inv']
+                
+                # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK (Class -> Task)
+                if not hasattr(self, 'class_to_task_tensor'):
+                    mapping = torch.zeros(self.out_dim, dtype=torch.long)
+                    for t_idx, class_list in enumerate(self.tasks_logits):
+                        for c in class_list:
+                            mapping[c] = t_idx
+                    self.class_to_task_tensor = mapping.cuda() # Đẩy lên GPU
+                
+                # BƯỚC 2: ĐO KHOẢNG CÁCH TỚI TẤT CẢ CÁC CLASS ĐÃ HỌC
+                available_classes = list(getattr(model.prompt, 'prototypes', {}).keys())
+                num_classes_seen = len(available_classes)
+                
+                # Khởi tạo ma trận khoảng cách bằng Vô Cực
+                dist_matrix = torch.full((B, self.valid_out_dim), float('inf')).cuda()
+                
+                for c_idx in available_classes:
+                    proto = model.prompt.prototypes[c_idx]
+                    mu = proto['mean']
+                    cov_inv = proto['cov_inv']
                     
                     diff = query - mu
                     left_term = torch.matmul(diff, cov_inv)
                     dist = torch.sum(left_term * diff, dim=1)
+                    dist_matrix[:, c_idx] = dist
+                
+                # BƯỚC 3: XỬ LÝ TOP-K VÀ TÍNH TRỌNG SỐ (WEIGHTED ENSEMBLE)
+                actual_K = min(K, num_classes_seen)
+                if actual_K == 0: 
+                    actual_K = 1 
                     
-                    better_mask = dist < min_distances
-                    min_distances[better_mask] = dist[better_mask]
-                    best_task_preds[better_mask] = t
-
+                # Lấy K class gần nhất (khoảng cách nhỏ nhất)
+                topk_dist, topk_classes = torch.topk(dist_matrix, k=actual_K, largest=False, dim=1)
+                
+                # Dùng Softmax nghịch đảo khoảng cách để ra Trọng số
+                topk_dist_stable = topk_dist - topk_dist[:, 0:1] 
+                weights = torch.nn.functional.softmax(-topk_dist_stable, dim=1) # Shape: [B, K]
+                
+                # Ánh xạ Top-K Classes về Top-K Tasks
+                topk_tasks = self.class_to_task_tensor[topk_classes] # Shape: [B, K]
+                
+                # Gộp trọng số cho các Task (scatter_add_)
+                task_weights = torch.zeros(B, len(self.tasks_logits)).cuda()
+                task_weights.scatter_add_(1, topk_tasks, weights)
+                
+                # Tracking Accuracy (Dựa vào Task của class Top 1)
                 if not hasattr(self, 'routing_correct'):
                     self.routing_correct, self.routing_total = 0, 0
-                    self.all_distances, self.all_routes_correct = [], []
-                    
+                
+                best_task_preds = topk_tasks[:, 0]
                 self.routing_correct += (best_task_preds == task.cuda()).sum().item()
                 self.routing_total += B
-                self.all_distances.extend(min_distances.cpu().numpy())
-                self.all_routes_correct.extend((best_task_preds == task.cuda()).cpu().numpy())
-                # Tính Ensemble Logit
+                
+                # BƯỚC 4: ENSEMBLE ĐIỂM SỐ TỪ CÁC EXPERT ĐƯỢC CHỌN
                 logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
                 logits_expert = torch.zeros_like(logits_merge)
                 
-                for t in range(self.task_count):
-                    idx = (best_task_preds == t).nonzero(as_tuple=True)[0]
-                    if len(idx) > 0:
-                        logits_expert[idx] = model.forward(input[idx], expert_id=t)[:, :self.valid_out_dim]
+                num_experts = len(getattr(model.prompt, 'expert_prompts', {}))
+                for t in range(num_experts):
+                    # CHỈ CHẠY expert_id=t cho những bức ảnh mà task t có trọng số > 0
+                    sample_mask = task_weights[:, t] > 0
+                    if sample_mask.any():
+                        out_t = model.forward(input[sample_mask], expert_id=t)[:, :self.valid_out_dim]
+                        
+                        # Nhân điểm Logit với trọng số niềm tin (Weight)
+                        w_t = task_weights[sample_mask, t].unsqueeze(1)
+                        logits_expert[sample_mask] += out_t * w_t
 
+                # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
                 output = logits_merge + logits_expert 
                 acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
                 
-                # Đóng gói và lưu đồ thị vào cuối epoch
+                # In ra tỷ lệ Routing đúng lúc Test xong
                 if i == len(dataloader) - 1 and self.routing_total > 0:
-                    self.log(f'>>> Task Routing Accuracy: {self.routing_correct/self.routing_total * 100:.2f}%')
-                    try:
-                        dist_arr = np.array(self.all_distances)
-                        corr_arr = np.array(self.all_routes_correct)
-                        plt.figure(figsize=(8, 6))
-                        plt.hist(dist_arr[corr_arr], alpha=0.5, label='Correct Route', color='green', bins=20)
-                        plt.hist(dist_arr[~corr_arr], alpha=0.5, label='Wrong Route', color='red', bins=20)
-                        plt.title(f'Mahalanobis Distance Distribution (Task {self.task_count})')
-                        plt.xlabel('Distance')
-                        plt.legend()
-                        os.makedirs('logs/cifar-100', exist_ok=True)
-                        plt.savefig(f'logs/cifar-100/distance_dist_task_{self.task_count}.png')
-                        plt.close()
-                    except Exception as e:
-                        self.log(f"Plot failed: {e}")
-                        
+                    self.log(f'>>> Class-Based Routing Acc: {self.routing_correct/self.routing_total * 100:.2f}% (Weighted K={actual_K})')
                     self.routing_correct, self.routing_total = 0, 0
-                    self.all_distances, self.all_routes_correct = [], []
             else:
                 mask = target >= task_in[0]
                 mask_ind = mask.nonzero().view(-1)

@@ -261,13 +261,13 @@ class NormalNN(nn.Module):
                 
                 for c_idx in available_classes:
                     proto = model.prompt.prototypes[c_idx]
-                    mu = proto['mean']
-                    cov_inv = proto['cov_inv']
+                    mu = proto['mean'] # Chỉ cần dùng Mean, bỏ qua cov_inv
                     
-                    diff = query - mu
-                    left_term = torch.matmul(diff, cov_inv)
-                    dist = torch.sum(left_term * diff, dim=1)
-                    dist_matrix[:, c_idx] = dist
+                    # TÍNH KHOẢNG CÁCH COSINE (Distance = 1 - Cosine_Sim)
+                    # Hàm cosine_similarity trả về [-1, 1] (1 là giống hệt, -1 là ngược hướng)
+                    # Lấy 1.0 trừ đi để biến nó thành "Khoảng cách" (Càng nhỏ càng tốt giống Mahalanobis)
+                    sim = torch.nn.functional.cosine_similarity(query, mu.unsqueeze(0), dim=1)
+                    dist_matrix[:, c_idx] = 1.0 - sim
                 
                 # BƯỚC 3: XỬ LÝ TOP-K VÀ TÍNH TRỌNG SỐ (WEIGHTED ENSEMBLE)
                 actual_K = min(K, num_classes_seen)

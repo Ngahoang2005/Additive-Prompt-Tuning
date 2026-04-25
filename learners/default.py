@@ -392,7 +392,8 @@ class NormalNN(nn.Module):
         self.log('=> Load Done')
         if self.gpu:
             self.model = self.model.cuda()
-        self.model.eval()    def load_pretrained(self, filename):
+        self.model.eval()    
+    def load_pretrained(self, filename):
         model_dict = torch.load(filename + 'class.pth')
         new_state_dict = {}
         for key, value in model_dict.items():

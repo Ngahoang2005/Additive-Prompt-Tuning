@@ -347,33 +347,52 @@ class NormalNN(nn.Module):
     ##########################################
     #             MODEL UTILS                #
     ##########################################
+    ##########################################
+    #             MODEL UTILS                #
+    ##########################################
     def save_model(self, filename):
         model_state = self.model.state_dict()
-        for key in model_state.keys():  # Always save it to cpu
+        for key in model_state.keys():  
             model_state[key] = model_state[key].cpu()
         self.log('=> Saving class model to:', filename)
         torch.save(model_state, filename + 'class.pth')
         
-        # --- BỔ SUNG LƯU PROTOTYPES VÀ EXPERTS ---
+        # --- FIX LỖI MẤT TRÍ NHỚ: Lưu thêm tasks và valid_out_dim ---
         custom_data = {
             'prototypes': getattr(self.model.prompt, 'prototypes', {}),
-            'expert_prompts': {k: v.cpu() for k, v in getattr(self.model.prompt, 'expert_prompts', {}).items()}
+            'expert_prompts': {k: v.cpu() for k, v in getattr(self.model.prompt, 'expert_prompts', {}).items()},
+            'tasks': getattr(self, 'tasks', []),          # <== Bổ sung
+            'valid_out_dim': getattr(self, 'valid_out_dim', 0) # <== Bổ sung
         }
         torch.save(custom_data, filename + 'custom_data.pth')
-        # --- KẾT THÚC BỔ SUNG ---
-        
         self.log('=> Save Done')
 
     def load_model(self, filename):
         model_dict = torch.load(filename + 'class.pth')
         self.model.load_state_dict(model_dict, strict=False)
 
+        # --- PHỤC HỒI TOÀN BỘ CẤU TRÚC ---
+        if os.path.exists(filename + 'custom_data.pth'):
+            custom_data = torch.load(filename + 'custom_data.pth')
+            self.model.prompt.prototypes = custom_data['prototypes']
+            for k, v in custom_data['expert_prompts'].items():
+                self.model.prompt.expert_prompts[k] = nn.Parameter(v.cuda() if self.gpu else v)
+            
+            # Phục hồi 2 biến cốt lõi cho Routing và Classifier
+            if 'tasks' in custom_data:
+                self.tasks = custom_data['tasks']
+            if 'valid_out_dim' in custom_data:
+                self.valid_out_dim = custom_data['valid_out_dim']
+                
+            # Xóa bảng cache ánh xạ cũ để validation tự động tạo lại cái mới chuẩn hơn
+            if hasattr(self, 'class_to_task_tensor'):
+                del self.class_to_task_tensor 
+        # ----------------------------------
+
         self.log('=> Load Done')
         if self.gpu:
             self.model = self.model.cuda()
-        self.model.eval()
-
-    def load_pretrained(self, filename):
+        self.model.eval()    def load_pretrained(self, filename):
         model_dict = torch.load(filename + 'class.pth')
         new_state_dict = {}
         for key, value in model_dict.items():

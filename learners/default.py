@@ -312,7 +312,8 @@ class NormalNN(nn.Module):
                         logits_expert[sample_mask] += out_t * w_t
 
                 # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
-                output = logits_merge + logits_expert 
+                #output = logits_merge + logits_expert 
+                output = logits_expert
                 acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
                 
                 # In ra tỷ lệ Routing đúng lúc Test xong

@@ -51,7 +51,7 @@ class Prompt_Learner(NormalNN):
                     orth_loss += torch.abs(sim).squeeze()
                 
                 # Nút vặn sức mạnh (có thể tinh chỉnh 0.1, 0.05, 0.01)
-                lambda_orth = 0.1 
+                lambda_orth = 0.5
                 total_loss = total_loss + lambda_orth * orth_loss 
                 
                 # In log để xác nhận hàm đang chạy (dùng \r để in đè trên cùng 1 dòng)

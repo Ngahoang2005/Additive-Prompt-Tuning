@@ -315,8 +315,8 @@ class NormalNN(nn.Module):
                             logits_expert[sample_mask] += out_t * w_t
 
                     # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
-                    output = logits_merge + logits_expert
-                    
+                    # output = logits_merge + logits_expert
+                    output = logits_expert
                     # Cập nhật Accuracy
                     acc = accumulate_acc(output, target, true_tasks, acc, topk=(self.top_k,))
                     

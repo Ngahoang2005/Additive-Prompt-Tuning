@@ -246,7 +246,7 @@ class NormalNN(nn.Module):
                     orth_loss += torch.abs(sim).squeeze()
                 
                 # ---> NÚT VẶN SỨC MẠNH: Bạn có thể chỉnh 0.1, 0.05 hoặc 0.01 ở đây
-                lambda_orth = 0.1 
+                lambda_orth = 0.5
                 
                 # Cộng dồn hình phạt (Orthogonal Loss) vào Loss tổng
                 total_loss = total_loss + lambda_orth * orth_loss

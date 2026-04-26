@@ -12,6 +12,21 @@ class Prompt_Learner(NormalNN):
         self.ema_coeff = learner_config['ema_coeff']
         super(Prompt_Learner, self).__init__(learner_config)
 
+    # def update_model(self, inputs, targets):
+    #     # logits
+    #     logits = self.model(inputs, train=True)
+        
+    #     logits = logits[:,:self.valid_out_dim]
+    #     logits[:,:self.last_valid_out_dim] = -float('inf')
+    #     total_loss = self.criterion(logits, targets.long())       
+        
+    #     # step
+    #     self.optimizer.zero_grad()
+    #     total_loss.backward()
+    #     self.optimizer.step()
+        
+    #     return total_loss.detach(), logits
+    # ortho
     def update_model(self, inputs, targets):
         # logits
         logits = self.model(inputs, train=True)
@@ -20,13 +35,35 @@ class Prompt_Learner(NormalNN):
         logits[:,:self.last_valid_out_dim] = -float('inf')
         total_loss = self.criterion(logits, targets.long())       
         
+        # =================================================================
+        # THÊM ORTHOGONAL LOSS TẠI ĐÂY (Ép các prompt ra xa nhau)
+        # =================================================================
+        if hasattr(self, 'task_count') and self.task_count > 0:
+            expert_prompts = getattr(self.model.prompt, 'expert_prompts', {})
+            
+            if len(expert_prompts) > 0:
+                orth_loss = 0.0
+                curr_prompt = self.model.prompt.prompt_tokens.view(-1)
+                
+                for old_id, old_prompt in expert_prompts.items():
+                    old_flat = old_prompt.view(-1).to(curr_prompt.device)
+                    sim = torch.nn.functional.cosine_similarity(curr_prompt.unsqueeze(0), old_flat.unsqueeze(0))
+                    orth_loss += torch.abs(sim).squeeze()
+                
+                # Nút vặn sức mạnh (có thể tinh chỉnh 0.1, 0.05, 0.01)
+                lambda_orth = 0.1 
+                total_loss = total_loss + lambda_orth * orth_loss 
+                
+                # In log để xác nhận hàm đang chạy (dùng \r để in đè trên cùng 1 dòng)
+                print(f'\r[Ortho] Val: {orth_loss.item():.4f} | Total Loss: {total_loss.item():.4f}', end='')
+        # =================================================================
+        
         # step
         self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
         
         return total_loss.detach(), logits
-
     def get_attn_heatmap(self, inputs):
         return 
 

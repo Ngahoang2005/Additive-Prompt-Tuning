@@ -12,7 +12,9 @@ from dataloaders.utils import *
 from torch.utils.data import DataLoader
 import learners
 from utils.calc_forgetting import calc_coda_forgetting, calc_general_forgetting
-
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.manifold import TSNE
 class Trainer:
 
     def __init__(self, args, seed, cur_iter, metric_keys, save_keys):
@@ -305,7 +307,56 @@ class Trainer:
             return {'global': avg_acc_all,'pt': avg_acc_pt}
         else:
             return {'global': avg_acc_all,'pt': avg_acc_pt}
-   
+    def visualize_tsne(self, task_idx):
+        self.learner.model.eval()
+        all_features = []
+        all_tasks = []
+
+        print(f"\n[t-SNE] Đang trích xuất features cho Task 1 đến Task {task_idx+1}...")
+        with torch.no_grad():
+            for j in range(task_idx + 1):
+                # Load test data cho từng task j đã học
+                self.test_dataset.load_dataset(j, train=False)
+                test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, num_workers=self.workers)
+                
+                for input, target, _ in test_loader:
+                    if self.learner.gpu:
+                        input = input.cuda()
+                    # Trích xuất feature từ ViT
+                    feat = self.learner.model.extract_cls_features(input, use_merge=True)
+                    all_features.append(feat.cpu().numpy())
+                    # Gán nhãn (màu) cho từng điểm dữ liệu dựa trên Task của nó
+                    all_tasks.extend([j] * input.shape[0])
+
+        all_features = np.concatenate(all_features, axis=0)
+        all_tasks = np.array(all_tasks)
+
+        print("[t-SNE] Đang chạy thuật toán giảm chiều dữ liệu t-SNE (Vui lòng đợi 1-2 phút)...")
+        tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+        features_2d = tsne.fit_transform(all_features)
+
+        # Bắt đầu vẽ biểu đồ
+        plt.figure(figsize=(12, 9))
+        sns.scatterplot(
+            x=features_2d[:, 0], 
+            y=features_2d[:, 1],
+            hue=all_tasks, 
+            palette=sns.color_palette("husl", task_idx + 1), # Đổi màu linh hoạt theo số Task
+            legend="full",
+            alpha=0.7,
+            s=40
+        )
+        plt.title(f"t-SNE Feature Space after learning {task_idx+1} Tasks\n(Orthogonal Prompts Visualization)", fontsize=14)
+        plt.xlabel("t-SNE Dimension 1")
+        plt.ylabel("t-SNE Dimension 2")
+        plt.legend(title='Task ID', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        
+        # Lưu file ảnh thẳng vào thư mục log
+        save_path = os.path.join(self.log_dir, f"tsne_task_{task_idx+1}.png")
+        plt.savefig(save_path, dpi=300)
+        print(f"✅ Đã lưu biểu đồ t-SNE thành công tại: {save_path}\n")
+        plt.close()
     def evaluate(self, avg_metrics):
 
         self.learner = learners.__dict__[self.learner_type].__dict__[self.learner_name](self.learner_config)
@@ -355,7 +406,11 @@ class Trainer:
             #     val_name = self.task_names[j]
             #     print(f"test task {val_name}, using model {self.task_names[i]}")
             #     metric_table_local['acc'][val_name][self.task_names[i]] = self.task_eval(j, local=True)
-                
+            if i == self.max_task - 1:
+                try:
+                    self.visualize_tsne(i)
+                except Exception as e:
+                    print(f"❌ Lỗi khi vẽ t-SNE: {e}")
         # summarize metrics
         avg_metrics['acc'] = self.summarize_acc(avg_metrics['acc'], metric_table['acc'])
         

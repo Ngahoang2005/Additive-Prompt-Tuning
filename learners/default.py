@@ -250,6 +250,7 @@ class NormalNN(nn.Module):
                 
                 # Cộng dồn hình phạt (Orthogonal Loss) vào Loss tổng
                 total_loss = total_loss + lambda_orth * orth_loss
+                print(f'Orthogonal Loss: {orth_loss.item():.4f}, Total Loss with Orth: {total_loss.item():.4f}' )
         # =================================================================
 
         # 3. Lan truyền ngược và cập nhật trọng số

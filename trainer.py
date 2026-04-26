@@ -331,28 +331,43 @@ class Trainer:
         all_features = np.concatenate(all_features, axis=0)
         all_tasks = np.array(all_tasks)
 
+        # =======================================================
+        # THÊM THUẬT TOÁN SHUFFLE (Xáo trộn thứ tự vẽ)
+        # =======================================================
+        shuffle_idx = np.random.permutation(len(all_tasks))
+        all_features = all_features[shuffle_idx]
+        all_tasks = all_tasks[shuffle_idx]
+        # =======================================================
+
         print("[t-SNE] Đang chạy thuật toán giảm chiều dữ liệu t-SNE (Vui lòng đợi 1-2 phút)...")
         tsne = TSNE(n_components=2, random_state=42, perplexity=30)
         features_2d = tsne.fit_transform(all_features)
 
         # Bắt đầu vẽ biểu đồ
         plt.figure(figsize=(12, 9))
+        
+        # Sắp xếp lại thứ tự Palette để Legend (Chú thích) không bị đảo lộn
+        unique_tasks = np.unique(all_tasks)
+        palette = sns.color_palette("husl", len(unique_tasks))
+        
         sns.scatterplot(
             x=features_2d[:, 0], 
             y=features_2d[:, 1],
             hue=all_tasks, 
-            palette=sns.color_palette("husl", task_idx + 1), # Đổi màu linh hoạt theo số Task
+            palette=palette,
             legend="full",
-            alpha=0.7,
-            s=40
+            alpha=0.8,
+            s=35,
+            edgecolor=None # Tắt viền để nhìn rõ các màu trộn vào nhau
         )
-        plt.title(f"t-SNE Feature Space after learning {task_idx+1} Tasks\n(Orthogonal Prompts Visualization)", fontsize=14)
+        
+        plt.title(f"t-SNE Feature Space after learning {task_idx+1} Tasks\n(Shuffled Order)", fontsize=14)
         plt.xlabel("t-SNE Dimension 1")
         plt.ylabel("t-SNE Dimension 2")
         plt.legend(title='Task ID', bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         
-        # Lưu file ảnh thẳng vào thư mục log
+        # Lưu file ảnh
         save_path = os.path.join(self.log_dir, f"tsne_task_{task_idx+1}.png")
         plt.savefig(save_path, dpi=300)
         print(f"✅ Đã lưu biểu đồ t-SNE thành công tại: {save_path}\n")

@@ -217,140 +217,7 @@ class NormalNN(nn.Module):
         return total_loss.detach(), logits
 
     # entropy
-    # def validation(self, dataloader, model=None, task_in=None, task_metric='acc', verbal=True, task_global=False):
-    #     if model is None:
-    #         model = self.model
-
-    #     # This function doesn't distinguish tasks.
-    #     batch_timer = Timer()
-    #     acc = AverageMeter()
-    #     batch_timer.tic()
-
-    #     orig_mode = model.training
-    #     model.eval()
-
-    #     err_cnt = 0
-    #     old_cnt = 0
-    #     X = []
-    #     Y = []
-        
-    #     for i, (input, target, task) in enumerate(dataloader):
-    #         # ==== BỌC NO_GRAD ĐỂ CHẶN PYTORCH ĂN LÉN RAM (CHỐNG OOM) ====
-    #         with torch.no_grad():
-    #             if self.gpu:
-    #                 input = input.cuda()
-    #                 target = target.cuda()
-                    
-    #             # [A] PHA GLOBAL EVALUATION (CLASS-INCREMENTAL)
-    #             if task_in is None:
-    #                 B = input.shape[0]
-    #                 K = 3 # ==> Bạn có thể đổi thành K=5 để xem có bứt phá mốc 80% không nhé
-                    
-    #                 query = model.extract_cls_features(input, use_merge=True)
-                    
-    #                 # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK
-    #                 if not hasattr(self, 'class_to_task_tensor'):
-    #                     mapping = torch.zeros(self.out_dim, dtype=torch.long)
-    #                     for t_idx, class_list in enumerate(self.tasks):
-    #                         for c in class_list:
-    #                             mapping[c] = t_idx
-    #                     self.class_to_task_tensor = mapping.cuda() # Đẩy lên GPU
-                    
-    #                 # BƯỚC 2: ĐO KHOẢNG CÁCH (DÙNG COSINE SIMILARITY TỐI ƯU CHO VIT)
-    #                 available_classes = list(getattr(model.prompt, 'prototypes', {}).keys())
-    #                 num_classes_seen = len(available_classes)
-                    
-    #                 # Khởi tạo ma trận khoảng cách bằng Vô Cực
-    #                 dist_matrix = torch.full((B, self.valid_out_dim), float('inf')).cuda()
-                    
-    #                 for c_idx in available_classes:
-    #                     proto = model.prompt.prototypes[c_idx]
-    #                     mu = proto['mean'] # Với Cosine, chỉ cần Mean là đủ, siêu nhẹ!
-                        
-    #                     # TÍNH KHOẢNG CÁCH COSINE
-    #                     sim = torch.nn.functional.cosine_similarity(query, mu.unsqueeze(0), dim=1)
-    #                     dist_matrix[:, c_idx] = 1.0 - sim
-                    
-    #                 # BƯỚC 3: XỬ LÝ TOP-K VÀ TÍNH TRỌNG SỐ (WEIGHTED ENSEMBLE)
-    #                 actual_K = min(K, num_classes_seen)
-    #                 if actual_K == 0: 
-    #                     actual_K = 1 
-                        
-    #                 # Lấy K class có khoảng cách nhỏ nhất
-    #                 topk_dist, topk_classes = torch.topk(dist_matrix, k=actual_K, largest=False, dim=1)
-                    
-    #                 # Dùng Softmax nghịch đảo khoảng cách để ra Trọng số
-    #                 topk_dist_stable = topk_dist - topk_dist[:, 0:1] 
-    #                 weights = torch.nn.functional.softmax(-topk_dist_stable, dim=1) # Shape: [B, K]
-                    
-    #                 # Ánh xạ Top-K Classes về Top-K Tasks
-    #                 topk_tasks = self.class_to_task_tensor[topk_classes] # Shape: [B, K]
-                    
-    #                 # Gộp trọng số cho các Task (Vì có thể nhiều class lọt top cùng thuộc 1 Task)
-    #                 task_weights = torch.zeros(B, len(self.tasks)).cuda()
-    #                 task_weights.scatter_add_(1, topk_tasks, weights)
-                    
-    #                 # TRACKING TỶ LỆ ROUTING CHÍNH XÁC (Sửa lỗi báo 0%)
-    #                 if not hasattr(self, 'routing_correct'):
-    #                     self.routing_correct, self.routing_total = 0, 0
-                    
-    #                 best_task_preds = topk_tasks[:, 0]
-    #                 true_tasks = self.class_to_task_tensor[target] # Lấy Task gốc từ Nhãn (target)
-    #                 self.routing_correct += (best_task_preds == true_tasks).sum().item()
-    #                 self.routing_total += B
-                    
-    #                 # BƯỚC 4: ENSEMBLE ĐIỂM SỐ TỪ CÁC EXPERT ĐƯỢC CHỌN
-    #                 logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
-    #                 logits_expert = torch.zeros_like(logits_merge)
-                    
-    #                 num_experts = len(getattr(model.prompt, 'expert_prompts', {}))
-    #                 for t in range(num_experts):
-    #                     # CHỈ CHẠY expert_id=t cho những bức ảnh mà task t có trọng số > 0
-    #                     sample_mask = task_weights[:, t] > 0
-    #                     if sample_mask.any():
-    #                         out_t = model.forward(input[sample_mask], expert_id=t)[:, :self.valid_out_dim]
-                            
-    #                         # Nhân điểm Logit với trọng số (Weight)
-    #                         w_t = task_weights[sample_mask, t].unsqueeze(1)
-    #                         logits_expert[sample_mask] += out_t * w_t
-
-    #                 # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
-    #                 output = logits_merge + logits_expert
-                    
-    #                 # Cập nhật Accuracy
-    #                 acc = accumulate_acc(output, target, true_tasks, acc, topk=(self.top_k,))
-                    
-    #                 # In ra tỷ lệ Routing đúng ở cuối dataloader
-    #                 if i == len(dataloader) - 1 and self.routing_total > 0:
-    #                     self.log(f'>>> Class-Based Routing Acc: {self.routing_correct/self.routing_total * 100:.2f}% (Weighted K={actual_K})')
-    #                     self.routing_correct, self.routing_total = 0, 0
-                
-    #             # [B] PHA LOCAL EVALUATION (TASK-INCREMENTAL)
-    #             else:
-    #                 mask = target >= task_in[0]
-    #                 mask_ind = mask.nonzero().view(-1)
-    #                 input, target = input[mask_ind], target[mask_ind]
-
-    #                 mask = target < task_in[-1]
-    #                 mask_ind = mask.nonzero().view(-1) 
-    #                 input, target = input[mask_ind], target[mask_ind]
-    #                 if len(target) > 1:
-    #                     if task_global:
-    #                         output = model.forward(input, local_test=False)[:, :self.valid_out_dim]
-    #                         acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-    #                     else:
-    #                         output = model.forward(input, local_test=True)[:, task_in]
-    #                         acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
-        
-    #     # Trả lại trạng thái Train cho model
-    #     model.train(orig_mode)
-
-    #     if verbal:
-    #         self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
-    #                 .format(acc=acc, time=batch_timer.toc()))
-    #     return acc.avg
-    
-    def validation(self, dataloader, model=None, task_in = None, task_metric='acc',  verbal = True, task_global=False):
+    def validation(self, dataloader, model=None, task_in=None, task_metric='acc', verbal=True, task_global=False):
         if model is None:
             model = self.model
 
@@ -366,19 +233,22 @@ class NormalNN(nn.Module):
         old_cnt = 0
         X = []
         Y = []
+        
         for i, (input, target, task) in enumerate(dataloader):
+            # ==== BỌC NO_GRAD ĐỂ CHẶN PYTORCH ĂN LÉN RAM (CHỐNG OOM) ====
             with torch.no_grad():
                 if self.gpu:
-                    
                     input = input.cuda()
-
                     target = target.cuda()
+                    
+                # [A] PHA GLOBAL EVALUATION (CLASS-INCREMENTAL)
                 if task_in is None:
                     B = input.shape[0]
-                    K = 3
+                    K = 3 # ==> Bạn có thể đổi thành K=5 để xem có bứt phá mốc 80% không nhé
+                    
                     query = model.extract_cls_features(input, use_merge=True)
                     
-                    # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK (Class -> Task)
+                    # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK
                     if not hasattr(self, 'class_to_task_tensor'):
                         mapping = torch.zeros(self.out_dim, dtype=torch.long)
                         for t_idx, class_list in enumerate(self.tasks):
@@ -386,7 +256,7 @@ class NormalNN(nn.Module):
                                 mapping[c] = t_idx
                         self.class_to_task_tensor = mapping.cuda() # Đẩy lên GPU
                     
-                    # BƯỚC 2: ĐO KHOẢNG CÁCH TỚI TẤT CẢ CÁC CLASS ĐÃ HỌC
+                    # BƯỚC 2: ĐO KHOẢNG CÁCH (DÙNG COSINE SIMILARITY TỐI ƯU CHO VIT)
                     available_classes = list(getattr(model.prompt, 'prototypes', {}).keys())
                     num_classes_seen = len(available_classes)
                     
@@ -395,11 +265,9 @@ class NormalNN(nn.Module):
                     
                     for c_idx in available_classes:
                         proto = model.prompt.prototypes[c_idx]
-                        mu = proto['mean'] # Chỉ cần dùng Mean, bỏ qua cov_inv
+                        mu = proto['mean'] # Với Cosine, chỉ cần Mean là đủ, siêu nhẹ!
                         
-                        # TÍNH KHOẢNG CÁCH COSINE (Distance = 1 - Cosine_Sim)
-                        # Hàm cosine_similarity trả về [-1, 1] (1 là giống hệt, -1 là ngược hướng)
-                        # Lấy 1.0 trừ đi để biến nó thành "Khoảng cách" (Càng nhỏ càng tốt giống Mahalanobis)
+                        # TÍNH KHOẢNG CÁCH COSINE
                         sim = torch.nn.functional.cosine_similarity(query, mu.unsqueeze(0), dim=1)
                         dist_matrix[:, c_idx] = 1.0 - sim
                     
@@ -408,7 +276,7 @@ class NormalNN(nn.Module):
                     if actual_K == 0: 
                         actual_K = 1 
                         
-                    # Lấy K class gần nhất (khoảng cách nhỏ nhất)
+                    # Lấy K class có khoảng cách nhỏ nhất
                     topk_dist, topk_classes = torch.topk(dist_matrix, k=actual_K, largest=False, dim=1)
                     
                     # Dùng Softmax nghịch đảo khoảng cách để ra Trọng số
@@ -418,16 +286,17 @@ class NormalNN(nn.Module):
                     # Ánh xạ Top-K Classes về Top-K Tasks
                     topk_tasks = self.class_to_task_tensor[topk_classes] # Shape: [B, K]
                     
-                    # Gộp trọng số cho các Task (scatter_add_)
+                    # Gộp trọng số cho các Task (Vì có thể nhiều class lọt top cùng thuộc 1 Task)
                     task_weights = torch.zeros(B, len(self.tasks)).cuda()
                     task_weights.scatter_add_(1, topk_tasks, weights)
                     
-                    # Tracking Accuracy (Dựa vào Task của class Top 1)
+                    # TRACKING TỶ LỆ ROUTING CHÍNH XÁC (Sửa lỗi báo 0%)
                     if not hasattr(self, 'routing_correct'):
                         self.routing_correct, self.routing_total = 0, 0
                     
                     best_task_preds = topk_tasks[:, 0]
-                    self.routing_correct += (best_task_preds == task.cuda()).sum().item()
+                    true_tasks = self.class_to_task_tensor[target] # Lấy Task gốc từ Nhãn (target)
+                    self.routing_correct += (best_task_preds == true_tasks).sum().item()
                     self.routing_total += B
                     
                     # BƯỚC 4: ENSEMBLE ĐIỂM SỐ TỪ CÁC EXPERT ĐƯỢC CHỌN
@@ -441,19 +310,22 @@ class NormalNN(nn.Module):
                         if sample_mask.any():
                             out_t = model.forward(input[sample_mask], expert_id=t)[:, :self.valid_out_dim]
                             
-                            # Nhân điểm Logit với trọng số niềm tin (Weight)
+                            # Nhân điểm Logit với trọng số (Weight)
                             w_t = task_weights[sample_mask, t].unsqueeze(1)
                             logits_expert[sample_mask] += out_t * w_t
 
                     # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
-                    #output = logits_merge + logits_expert 
-                    output = logits_expert
-                    acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+                    output = logits_merge + logits_expert
                     
-                    # In ra tỷ lệ Routing đúng lúc Test xong
+                    # Cập nhật Accuracy
+                    acc = accumulate_acc(output, target, true_tasks, acc, topk=(self.top_k,))
+                    
+                    # In ra tỷ lệ Routing đúng ở cuối dataloader
                     if i == len(dataloader) - 1 and self.routing_total > 0:
                         self.log(f'>>> Class-Based Routing Acc: {self.routing_correct/self.routing_total * 100:.2f}% (Weighted K={actual_K})')
                         self.routing_correct, self.routing_total = 0, 0
+                
+                # [B] PHA LOCAL EVALUATION (TASK-INCREMENTAL)
                 else:
                     mask = target >= task_in[0]
                     mask_ind = mask.nonzero().view(-1)
@@ -464,19 +336,147 @@ class NormalNN(nn.Module):
                     input, target = input[mask_ind], target[mask_ind]
                     if len(target) > 1:
                         if task_global:
-                            output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
+                            output = model.forward(input, local_test=False)[:, :self.valid_out_dim]
                             acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
                         else:
-                            output = model.forward(input,local_test=True)[:, task_in]
+                            output = model.forward(input, local_test=True)[:, task_in]
                             acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
-            
         
+        # Trả lại trạng thái Train cho model
         model.train(orig_mode)
 
         if verbal:
             self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
                     .format(acc=acc, time=batch_timer.toc()))
         return acc.avg
+    
+    # def validation(self, dataloader, model=None, task_in = None, task_metric='acc',  verbal = True, task_global=False):
+    #     if model is None:
+    #         model = self.model
+
+    #     # This function doesn't distinguish tasks.
+    #     batch_timer = Timer()
+    #     acc = AverageMeter()
+    #     batch_timer.tic()
+
+    #     orig_mode = model.training
+    #     model.eval()
+
+    #     err_cnt = 0
+    #     old_cnt = 0
+    #     X = []
+    #     Y = []
+    #     for i, (input, target, task) in enumerate(dataloader):
+    #         with torch.no_grad():
+    #             if self.gpu:
+                    
+    #                 input = input.cuda()
+
+    #                 target = target.cuda()
+    #             if task_in is None:
+    #                 B = input.shape[0]
+    #                 K = 3
+    #                 query = model.extract_cls_features(input, use_merge=True)
+                    
+    #                 # BƯỚC 1: TẠO BẢNG ÁNH XẠ TỪ CLASS SANG TASK (Class -> Task)
+    #                 if not hasattr(self, 'class_to_task_tensor'):
+    #                     mapping = torch.zeros(self.out_dim, dtype=torch.long)
+    #                     for t_idx, class_list in enumerate(self.tasks):
+    #                         for c in class_list:
+    #                             mapping[c] = t_idx
+    #                     self.class_to_task_tensor = mapping.cuda() # Đẩy lên GPU
+                    
+    #                 # BƯỚC 2: ĐO KHOẢNG CÁCH TỚI TẤT CẢ CÁC CLASS ĐÃ HỌC
+    #                 available_classes = list(getattr(model.prompt, 'prototypes', {}).keys())
+    #                 num_classes_seen = len(available_classes)
+                    
+    #                 # Khởi tạo ma trận khoảng cách bằng Vô Cực
+    #                 dist_matrix = torch.full((B, self.valid_out_dim), float('inf')).cuda()
+                    
+    #                 for c_idx in available_classes:
+    #                     proto = model.prompt.prototypes[c_idx]
+    #                     mu = proto['mean'] # Chỉ cần dùng Mean, bỏ qua cov_inv
+                        
+    #                     # TÍNH KHOẢNG CÁCH COSINE (Distance = 1 - Cosine_Sim)
+    #                     # Hàm cosine_similarity trả về [-1, 1] (1 là giống hệt, -1 là ngược hướng)
+    #                     # Lấy 1.0 trừ đi để biến nó thành "Khoảng cách" (Càng nhỏ càng tốt giống Mahalanobis)
+    #                     sim = torch.nn.functional.cosine_similarity(query, mu.unsqueeze(0), dim=1)
+    #                     dist_matrix[:, c_idx] = 1.0 - sim
+                    
+    #                 # BƯỚC 3: XỬ LÝ TOP-K VÀ TÍNH TRỌNG SỐ (WEIGHTED ENSEMBLE)
+    #                 actual_K = min(K, num_classes_seen)
+    #                 if actual_K == 0: 
+    #                     actual_K = 1 
+                        
+    #                 # Lấy K class gần nhất (khoảng cách nhỏ nhất)
+    #                 topk_dist, topk_classes = torch.topk(dist_matrix, k=actual_K, largest=False, dim=1)
+                    
+    #                 # Dùng Softmax nghịch đảo khoảng cách để ra Trọng số
+    #                 topk_dist_stable = topk_dist - topk_dist[:, 0:1] 
+    #                 weights = torch.nn.functional.softmax(-topk_dist_stable, dim=1) # Shape: [B, K]
+                    
+    #                 # Ánh xạ Top-K Classes về Top-K Tasks
+    #                 topk_tasks = self.class_to_task_tensor[topk_classes] # Shape: [B, K]
+                    
+    #                 # Gộp trọng số cho các Task (scatter_add_)
+    #                 task_weights = torch.zeros(B, len(self.tasks)).cuda()
+    #                 task_weights.scatter_add_(1, topk_tasks, weights)
+                    
+    #                 # Tracking Accuracy (Dựa vào Task của class Top 1)
+    #                 if not hasattr(self, 'routing_correct'):
+    #                     self.routing_correct, self.routing_total = 0, 0
+                    
+    #                 best_task_preds = topk_tasks[:, 0]
+    #                 self.routing_correct += (best_task_preds == task.cuda()).sum().item()
+    #                 self.routing_total += B
+                    
+    #                 # BƯỚC 4: ENSEMBLE ĐIỂM SỐ TỪ CÁC EXPERT ĐƯỢC CHỌN
+    #                 logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
+    #                 logits_expert = torch.zeros_like(logits_merge)
+                    
+    #                 num_experts = len(getattr(model.prompt, 'expert_prompts', {}))
+    #                 for t in range(num_experts):
+    #                     # CHỈ CHẠY expert_id=t cho những bức ảnh mà task t có trọng số > 0
+    #                     sample_mask = task_weights[:, t] > 0
+    #                     if sample_mask.any():
+    #                         out_t = model.forward(input[sample_mask], expert_id=t)[:, :self.valid_out_dim]
+                            
+    #                         # Nhân điểm Logit với trọng số niềm tin (Weight)
+    #                         w_t = task_weights[sample_mask, t].unsqueeze(1)
+    #                         logits_expert[sample_mask] += out_t * w_t
+
+    #                 # Chốt hạ: Kết hợp Kiến thức Nền (Merge) và Hội đồng Chuyên gia (Experts)
+    #                 #output = logits_merge + logits_expert 
+    #                 output = logits_expert
+    #                 acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+                    
+    #                 # In ra tỷ lệ Routing đúng lúc Test xong
+    #                 if i == len(dataloader) - 1 and self.routing_total > 0:
+    #                     self.log(f'>>> Class-Based Routing Acc: {self.routing_correct/self.routing_total * 100:.2f}% (Weighted K={actual_K})')
+    #                     self.routing_correct, self.routing_total = 0, 0
+    #             else:
+    #                 mask = target >= task_in[0]
+    #                 mask_ind = mask.nonzero().view(-1)
+    #                 input, target = input[mask_ind], target[mask_ind]
+
+    #                 mask = target < task_in[-1]
+    #                 mask_ind = mask.nonzero().view(-1) 
+    #                 input, target = input[mask_ind], target[mask_ind]
+    #                 if len(target) > 1:
+    #                     if task_global:
+    #                         output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
+    #                         acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+    #                     else:
+    #                         output = model.forward(input,local_test=True)[:, task_in]
+    #                         acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
+            
+        
+    #     model.train(orig_mode)
+
+    #     if verbal:
+    #         self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
+    #                 .format(acc=acc, time=batch_timer.toc()))
+    #     return acc.avg
 
    
     def save_model(self, filename):

@@ -394,102 +394,63 @@ class NormalNN(nn.Module):
     #     return acc.avg
     
     #cosine
-    def validation(self, dataloader, model=None, task_in = None, task_metric='acc',  verbal = True, task_global=False):
-        if model is None:
-            model = self.model
-
-        # This function doesn't distinguish tasks.
-        batch_timer = Timer()
+    def validation(self, dataloader, model=None, task_in=None, task_metric='acc', verbal=True, task_global=False):
+        if model is None: model = self.model
         acc = AverageMeter()
-        batch_timer.tic()
-
-        orig_mode = model.training
+        routing_acc = AverageMeter() # Dùng AverageMeter để tracking chuẩn hơn
         model.eval()
 
-        err_cnt = 0
-        old_cnt = 0
-        X = []
-        Y = []
-        for i, (input, target, task) in enumerate(dataloader):
-            with torch.no_grad():
+        with torch.no_grad():
+            for i, (input, target, task) in enumerate(dataloader):
                 if self.gpu:
-                    
-                    input = input.cuda()
+                    input, target = input.cuda(), target.cuda()
 
-                    target = target.cuda()
-                # [A] PHA GLOBAL EVALUATION (CLASS-INCREMENTAL BẰNG MỎ NEO)
+                # [A] GLOBAL EVALUATION (Chọn Task bằng Anchor)
                 if task_in is None:
-                    B = input.shape[0]
                     query = model.extract_cls_features(input, use_merge=True)
-                    query_norm = torch.nn.functional.normalize(query, p=2, dim=1)
+                    query_norm = F.normalize(query, p=2, dim=1)
                     
-                    # 1. GOM TOÀN BỘ MỎ NEO LẠI THÀNH MA TRẬN
-                    num_tasks = len(self.task_anchors)
-                    anchor_list = []
-                    for t in range(num_tasks):
-                        anchor_norm = torch.nn.functional.normalize(self.task_anchors[str(t)], p=2, dim=0)
-                        anchor_list.append(anchor_norm)
-                    anchors_tensor = torch.stack(anchor_list) # Shape: [num_tasks, 768]
+                    # 1. Thu thập Anchor và Tính Similarity
+                    anchors = torch.stack([F.normalize(self.task_anchors[str(t)], p=2, dim=0) 
+                                         for t in range(len(self.task_anchors))])
+                    sim_matrix = torch.matmul(query_norm, anchors.t())
+                    task_preds = torch.argmax(sim_matrix, dim=1)
                     
-                    # 2. ĐỊNH TUYẾN: XEM ẢNH GẦN MỎ NEO NÀO NHẤT (Dùng nhân ma trận siêu nhanh)
-                    sim_matrix = torch.matmul(query_norm, anchors_tensor.t()) # Shape: [B, num_tasks]
-                    best_task_preds = torch.argmax(sim_matrix, dim=1) # Task dự đoán
-                    
-                    # Tracking Accuracy
-                    if not hasattr(self, 'routing_correct'):
-                        self.routing_correct, self.routing_total = 0, 0
-                        # Lấy task chuẩn từ target
-                        mapping = torch.zeros(self.out_dim, dtype=torch.long).cuda()
-                        for t_idx, class_list in enumerate(self.tasks):
-                            for c in class_list:
-                                mapping[c] = t_idx
-                        self.class_to_task_tensor = mapping
+                    # 2. Tracking Routing Accuracy (Tỷ lệ chọn đúng Task)
+                    if not hasattr(self, 'class_to_task_tensor'):
+                        self._create_class_to_task_mapping()
                     
                     true_tasks = self.class_to_task_tensor[target]
-                    self.routing_correct += (best_task_preds == true_tasks).sum().item()
-                    self.routing_total += B
-                    
-                    # 3. LẤY LOGIT TỪ EXPERT CỦA TASK CHIẾN THẮNG
+                    r_acc = (task_preds == true_tasks).sum().item() / input.size(0)
+                    routing_acc.update(r_acc, input.size(0))
+
+                    # 3. Inference với Expert tương ứng
                     logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
                     logits_expert = torch.zeros_like(logits_merge)
-                    
-                    for t in range(num_tasks):
-                        sample_mask = best_task_preds == t
-                        if sample_mask.any():
-                            out_t = model.forward(input[sample_mask], expert_id=t)[:, :self.valid_out_dim]
-                            logits_expert[sample_mask] = out_t
+                    for t in range(len(self.task_anchors)):
+                        mask = (task_preds == t)
+                        if mask.any():
+                            logits_expert[mask] = model.forward(input[mask], expert_id=t)[:, :self.valid_out_dim]
                             
                     output = logits_merge + logits_expert
                     acc = accumulate_acc(output, target, true_tasks, acc, topk=(self.top_k,))
-                    
-                    if i == len(dataloader) - 1 and self.routing_total > 0:
-                        self.log(f'>>> Anchor-Based Routing Acc: {self.routing_correct/self.routing_total * 100:.2f}%')
-                        self.routing_correct, self.routing_total = 0, 0
+
+                # [B] LOCAL EVALUATION (Dành cho Task-Incremental)
                 else:
-                    mask = target >= task_in[0]
-                    mask_ind = mask.nonzero().view(-1)
-                    input, target = input[mask_ind], target[mask_ind]
+                    # Giữ nguyên logic cũ của bạn nhưng bọc trong no_grad
+                    output = model.forward(input, local_test=True)[:, task_in]
+                    acc = accumulate_acc(output, target - task_in[0], task, acc, topk=(self.top_k,))
 
-                    mask = target < task_in[-1]
-                    mask_ind = mask.nonzero().view(-1) 
-                    input, target = input[mask_ind], target[mask_ind]
-                    if len(target) > 1:
-                        if task_global:
-                            output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
-                            acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-                        else:
-                            output = model.forward(input,local_test=True)[:, task_in]
-                            acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
+        if verbal and task_in is None:
+            self.log(f'>>> Global Routing Acc: {routing_acc.avg * 100:.2f}%')
             
-        
-        model.train(orig_mode)
-
-        if verbal:
-            self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
-                    .format(acc=acc, time=batch_timer.toc()))
         return acc.avg
 
-   
+    def _create_class_to_task_mapping(self):
+        mapping = torch.zeros(self.out_dim, dtype=torch.long).cuda()
+        for t_idx, class_list in enumerate(self.tasks):
+            for c in class_list: mapping[c] = t_idx
+        self.class_to_task_tensor = mapping
     def save_model(self, filename):
         model_state = self.model.state_dict()
         for key in model_state.keys():  

@@ -1,7 +1,9 @@
 #prompt.py
 from __future__ import print_function
 import torch
+from torch import nn
 import models
+import torch.nn as nn
 from utils.metric import accuracy, AverageMeter, Timer
 from .default import NormalNN, weight_reset, accumulate_acc
 from utils.schedulers import CosineSchedule
@@ -11,6 +13,7 @@ class Prompt_Learner(NormalNN):
         self.prompt_param = learner_config['prompt_param']
         self.ema_coeff = learner_config['ema_coeff']
         super(Prompt_Learner, self).__init__(learner_config)
+        self.task_anchors = nn.ParameterDict()
 
     # def update_model(self, inputs, targets):
     #     # logits
@@ -28,40 +31,60 @@ class Prompt_Learner(NormalNN):
     #     return total_loss.detach(), logits
     # ortho
     def update_model(self, inputs, targets):
-        # logits
-        logits = self.model(inputs, train=True)
+        # 1. Khởi tạo Mỏ neo cho Task hiện tại nếu chưa có
+        task_str = str(self.task_count)
+        if task_str not in self.task_anchors:
+            # Khởi tạo vector ngẫu nhiên 768 chiều (giả sử ViT-B/16 dùng 768)
+            anchor = nn.Parameter(torch.randn(768).cuda() if self.gpu else torch.randn(768))
+            self.task_anchors[task_str] = anchor
+            self.init_optimizer() # Refresh optimizer để nó nhận diện tham số mới
+
+        # 2. Lấy Feature (để định tuyến) và Logit (để phân loại)
+        # Tùy kiến trúc ViT của bạn, hàm model() có thể trả về cả feature nếu ta chỉnh nhẹ, 
+        # hoặc gọi hàm extract_cls_features như lúc Validation.
+        features = self.model.extract_cls_features(inputs, use_merge=True)
+        logits = self.model(inputs, train=True)[:, :self.valid_out_dim]
+        logits[:, :self.last_valid_out_dim] = -float('inf')
         
-        logits = logits[:,:self.valid_out_dim]
-        logits[:,:self.last_valid_out_dim] = -float('inf')
-        total_loss = self.criterion(logits, targets.long())       
+        # 3. Tính Loss Phân loại (Nhiệm vụ chính)
+        loss_ce = self.criterion(logits, targets.long())       
         
         # =================================================================
-        # THÊM ORTHOGONAL LOSS TẠI ĐÂY (Ép các prompt ra xa nhau)
+        # 4. HỌC THUYẾT MỎ NEO (ANCHOR GUIDANCE LOSS)
         # =================================================================
-        if hasattr(self, 'task_count') and self.task_count > 0:
-            expert_prompts = getattr(self.model.prompt, 'expert_prompts', {})
-            
-            if len(expert_prompts) > 0:
-                orth_loss = 0.0
-                curr_prompt = self.model.prompt.prompt_tokens.view(-1)
+        curr_anchor = self.task_anchors[task_str]
+        
+        # Lực Kéo (Pull): Ép feature của ảnh tiến về gần Mỏ neo của Task hiện tại
+        # Cosine tiến về 1 -> (1 - Cosine) tiến về 0
+        sim_pull = torch.nn.functional.cosine_similarity(features, curr_anchor.unsqueeze(0), dim=1)
+        loss_pull = (1.0 - sim_pull).mean()
+        
+        loss_push_ortho = 0.0
+        if self.task_count > 0:
+            for t in range(self.task_count):
+                old_anchor = self.task_anchors[str(t)]
                 
-                for old_id, old_prompt in expert_prompts.items():
-                    old_flat = old_prompt.view(-1).to(curr_prompt.device)
-                    sim = torch.nn.functional.cosine_similarity(curr_prompt.unsqueeze(0), old_flat.unsqueeze(0))
-                    orth_loss += torch.abs(sim).squeeze()
+                # Lực Đẩy 1 (Push Features): Đẩy feature ảnh hiện tại ra xa các Mỏ neo cũ
+                sim_push = torch.nn.functional.cosine_similarity(features, old_anchor.unsqueeze(0), dim=1)
+                loss_push_ortho += torch.abs(sim_push).mean() # Ép góc về 90 độ
                 
-                # Nút vặn sức mạnh (có thể tinh chỉnh 0.1, 0.05, 0.01)
-                lambda_orth = 0.0
-                total_loss = total_loss + lambda_orth * orth_loss 
-                
-                # In log để xác nhận hàm đang chạy (dùng \r để in đè trên cùng 1 dòng)
-                print(f'\r[Ortho] Val: {orth_loss.item():.4f} | Total Loss: {total_loss.item():.4f}', end='')
+                # Lực Đẩy 2 (Ortho Anchors): Bản thân các Mỏ neo cũng phải vuông góc với nhau
+                sim_anchors = torch.nn.functional.cosine_similarity(curr_anchor.unsqueeze(0), old_anchor.unsqueeze(0))
+                loss_push_ortho += torch.abs(sim_anchors).squeeze()
+        
+        # Trọng số cân bằng (Cần tuning, thử 0.1)
+        lambda_guide = 0.1
+        total_loss = loss_ce + lambda_guide * (loss_pull + loss_push_ortho)
+        
+        print(f'\r[Anchor Guide] Pull: {loss_pull.item():.4f} | Push: {loss_push_ortho if isinstance(loss_push_ortho, float) else loss_push_ortho.item():.4f} | CE: {loss_ce.item():.4f}', end='')
         # =================================================================
         
-        # step
+        # 5. Backprop
         self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
+        
+        return total_loss.detach(), logits
         
         return total_loss.detach(), logits
     def get_attn_heatmap(self, inputs):
@@ -73,10 +96,10 @@ class Prompt_Learner(NormalNN):
         # parse optimizer args
         # Multi-GPU
         if len(self.config['gpuid']) > 1:
-            params_to_opt = list(self.model.module.prompt.parameters()) + list(self.model.module.last.parameters())
+            params_to_opt = list(self.model.module.prompt.parameters()) + list(self.model.module.last.parameters()) + list(self.task_anchors.parameters())
         else:
-            params_to_opt = list(self.model.prompt.parameters()) + list(self.model.last.parameters())
-        print('*****************************************')
+            # ---> BỔ SUNG list(self.task_anchors.parameters()) VÀO ĐÂY <---
+            params_to_opt = list(self.model.prompt.parameters()) + list(self.model.last.parameters()) + list(self.task_anchors.parameters())
         optimizer_arg = {'params':params_to_opt,
                          'lr':self.config['lr'],
                          'weight_decay':self.config['weight_decay']}

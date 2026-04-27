@@ -397,7 +397,7 @@ class NormalNN(nn.Module):
     def validation(self, dataloader, model=None, task_in=None, task_metric='acc', verbal=True, task_global=False):
         if model is None: model = self.model
         acc = AverageMeter()
-        routing_acc = AverageMeter() # Dùng AverageMeter để tracking chuẩn hơn
+        routing_acc = AverageMeter()
         model.eval()
 
         with torch.no_grad():
@@ -409,14 +409,21 @@ class NormalNN(nn.Module):
                 if task_in is None:
                     query = model.extract_cls_features(input, use_merge=True)
                     query_norm = F.normalize(query, p=2, dim=1)
-                    # Chèn vào trước dòng 414
-                    # Thay thế đoạn print gây lỗi bằng đoạn này:
-                    print(f"DEBUG: task_anchors keys available: {list(self.task_anchors.keys())}")
-                    # Nếu learner có thuộc tính task_id, hãy in nó ra để biết bạn đang ở task nào
-                    if hasattr(self, 'task_id'):
-                        print(f"DEBUG: Current evaluating task_id: {self.task_id}")
-                    anchors = torch.stack([F.normalize(self.task_anchors[str(t)], p=2, dim=0) 
-                                         for t in range(len(self.task_anchors))])
+                    
+                    # 1. Lọc và lấy các Anchor an toàn
+                    valid_keys = [str(t) for t in range(getattr(self, 'task_id', 0) + 1) if str(t) in getattr(self, 'task_anchors', {})]
+
+                    if len(valid_keys) == 0:
+                        print("DEBUG: No anchors found during validation. Returning 0.0")
+                        return 0.0 
+                    else:
+                        # [SỬA QUAN TRỌNG 1]: Dùng dim=-1 để chuẩn hóa (an toàn cho cả vector 1D lẫn tensor 2D)
+                        anchors = torch.stack([F.normalize(self.task_anchors[k], p=2, dim=-1) for k in valid_keys])
+                        
+                        # [SỬA QUAN TRỌNG 2]: Đưa anchors lên cùng device với query (GPU)
+                        anchors = anchors.to(query_norm.device)
+
+                    # Tính Cosine Similarity (Dot product của 2 vectors đã L2-normalized)
                     sim_matrix = torch.matmul(query_norm, anchors.t())
                     task_preds = torch.argmax(sim_matrix, dim=1)
                     
@@ -431,26 +438,27 @@ class NormalNN(nn.Module):
                     # 3. Inference với Expert tương ứng
                     logits_merge = model.forward(input, use_merge=True)[:, :self.valid_out_dim]
                     logits_expert = torch.zeros_like(logits_merge)
-                    for t in range(len(self.task_anchors)):
+                    
+                    # Lặp qua các task có trong batch thay vì toàn bộ để tối ưu tốc độ
+                    unique_preds = torch.unique(task_preds)
+                    for t in unique_preds:
                         mask = (task_preds == t)
                         if mask.any():
-                            logits_expert[mask] = model.forward(input[mask], expert_id=t)[:, :self.valid_out_dim]
+                            # Lưu ý: Chắc chắn model.forward nhận t dạng int (t.item()) nếu cần
+                            logits_expert[mask] = model.forward(input[mask], expert_id=t.item())[:, :self.valid_out_dim]
                             
                     output = logits_merge + logits_expert
                     acc = accumulate_acc(output, target, true_tasks, acc, topk=(self.top_k,))
 
                 # [B] LOCAL EVALUATION (Dành cho Task-Incremental)
                 else:
-                    # Giữ nguyên logic cũ của bạn nhưng bọc trong no_grad
                     output = model.forward(input, local_test=True)[:, task_in]
                     acc = accumulate_acc(output, target - task_in[0], task, acc, topk=(self.top_k,))
 
         if verbal and task_in is None:
             self.log(f'>>> Global Routing Acc: {routing_acc.avg * 100:.2f}%')
             
-        return acc.avg
-
-    def _create_class_to_task_mapping(self):
+        return acc.avg    def _create_class_to_task_mapping(self):
         mapping = torch.zeros(self.out_dim, dtype=torch.long).cuda()
         for t_idx, class_list in enumerate(self.tasks):
             for c in class_list: mapping[c] = t_idx

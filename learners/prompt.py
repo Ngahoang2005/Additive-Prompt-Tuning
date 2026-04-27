@@ -52,29 +52,29 @@ class Prompt_Learner(NormalNN):
         # =================================================================
         # 4. HỌC THUYẾT MỎ NEO (ANCHOR GUIDANCE LOSS)
         # =================================================================
-        curr_anchor = self.task_anchors[task_str]
+        # =================================================================
+        # 4. HỌC THUYẾT MỎ NEO (ANCHOR GUIDANCE LOSS)
+        # =================================================================
+        # BẮT BUỘC CHUẨN HÓA MỎ NEO VÀ FEATURE ĐỂ ĐO COSINE CHUẨN XÁC
+        curr_anchor = torch.nn.functional.normalize(self.task_anchors[task_str], p=2, dim=0)
+        features_norm = torch.nn.functional.normalize(features, p=2, dim=1)
         
-        # Lực Kéo (Pull): Ép feature của ảnh tiến về gần Mỏ neo của Task hiện tại
-        # Cosine tiến về 1 -> (1 - Cosine) tiến về 0
-        sim_pull = torch.nn.functional.cosine_similarity(features, curr_anchor.unsqueeze(0), dim=1)
+        # Lực Kéo (Pull): Ép feature của ảnh tiến về gần Mỏ neo
+        sim_pull = torch.nn.functional.cosine_similarity(features_norm, curr_anchor.unsqueeze(0), dim=1)
         loss_pull = (1.0 - sim_pull).mean()
         
         loss_push_ortho = 0.0
         if self.task_count > 0:
             for t in range(self.task_count):
-                old_anchor = self.task_anchors[str(t)]
+                old_anchor = torch.nn.functional.normalize(self.task_anchors[str(t)], p=2, dim=0)
                 
-                # Lực Đẩy 1 (Push Features): Đẩy feature ảnh hiện tại ra xa các Mỏ neo cũ
-                sim_push = torch.nn.functional.cosine_similarity(features, old_anchor.unsqueeze(0), dim=1)
-                loss_push_ortho += torch.abs(sim_push).mean() # Ép góc về 90 độ
-                
-                # Lực Đẩy 2 (Ortho Anchors): Bản thân các Mỏ neo cũng phải vuông góc với nhau
+                # Lực Đẩy (Push): Đẩy các Mỏ neo ra xa nhau (ép góc về 90 độ -> Cosine = 0)
                 sim_anchors = torch.nn.functional.cosine_similarity(curr_anchor.unsqueeze(0), old_anchor.unsqueeze(0))
                 loss_push_ortho += torch.abs(sim_anchors).squeeze()
         
-        # Trọng số cân bằng (Cần tuning, thử 0.1)
-        lambda_guide = 0.1
+        lambda_guide = 0.5 # Tăng lực đẩy lên 0.5 để bẻ không gian mạnh hơn
         total_loss = loss_ce + lambda_guide * (loss_pull + loss_push_ortho)
+        # =================================================================
         
         print(f'\r[Anchor Guide] Pull: {loss_pull.item():.4f} | Push: {loss_push_ortho if isinstance(loss_push_ortho, float) else loss_push_ortho.item():.4f} | CE: {loss_ce.item():.4f}', end='')
         # =================================================================

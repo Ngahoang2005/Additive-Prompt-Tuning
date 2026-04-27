@@ -337,31 +337,39 @@ class Trainer:
         shuffle_idx = np.random.permutation(len(all_tasks))
         all_features = all_features[shuffle_idx]
         all_tasks = all_tasks[shuffle_idx]
+        anchors_np = []
+        for t in range(task_idx + 1):
+            # Lấy mỏ neo, chuẩn hóa y hệt lúc Test
+            anchor = torch.nn.functional.normalize(self.learner.task_anchors[str(t)], p=2, dim=0)
+            anchors_np.append(anchor.cpu().detach().numpy())
+        anchors_np = np.array(anchors_np)
+        
+        # Gộp Features và Anchors vào chung 1 mảng để t-SNE ép xuống 2D cùng nhau
+        combined_data = np.concatenate([all_features, anchors_np], axis=0)
+
+        print(f"[t-SNE] Đang ép {len(combined_data)} điểm (Features + Anchors) xuống 2D...")
+        tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+        features_2d_combined = tsne.fit_transform(combined_data)
+
+        # Tách lại ra làm 2 mảng sau khi đã ép xuống 2D
+        features_2d = features_2d_combined[:-len(anchors_np)]
+        anchors_2d = features_2d_combined[-len(anchors_np):]
         # =======================================================
 
-        print("[t-SNE] Đang chạy thuật toán giảm chiều dữ liệu t-SNE (Vui lòng đợi 1-2 phút)...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=30)
-        features_2d = tsne.fit_transform(all_features)
+        shuffle_idx = np.random.permutation(len(all_tasks))
+        features_2d = features_2d[shuffle_idx]
+        all_tasks = all_tasks[shuffle_idx]
 
-        # Bắt đầu vẽ biểu đồ
         plt.figure(figsize=(12, 9))
+        palette = sns.color_palette("husl", task_idx + 1)
         
-        # Sắp xếp lại thứ tự Palette để Legend (Chú thích) không bị đảo lộn
-        unique_tasks = np.unique(all_tasks)
-        palette = sns.color_palette("husl", len(unique_tasks))
+        # 1. Vẽ Features (các chấm tròn nhỏ)
+        sns.scatterplot(x=features_2d[:, 0], y=features_2d[:, 1], hue=all_tasks, palette=palette, legend="full", alpha=0.6, s=35, edgecolor=None)
         
-        sns.scatterplot(
-            x=features_2d[:, 0], 
-            y=features_2d[:, 1],
-            hue=all_tasks, 
-            palette=palette,
-            legend="full",
-            alpha=0.8,
-            s=35,
-            edgecolor=None # Tắt viền để nhìn rõ các màu trộn vào nhau
-        )
+        # 2. Vẽ Mỏ neo (Ngôi sao màu đen khổng lồ)
+        plt.scatter(anchors_2d[:, 0], anchors_2d[:, 1], marker='*', s=600, c='black', edgecolor='white', linewidths=1.5, label='Task Anchors', zorder=10)
         
-        plt.title(f"t-SNE Feature Space after learning {task_idx+1} Tasks\n(Shuffled Order)", fontsize=14)
+        plt.title(f"t-SNE Feature Space with Learnable Anchors ({task_idx+1} Tasks)", fontsize=14)
         plt.xlabel("t-SNE Dimension 1")
         plt.ylabel("t-SNE Dimension 2")
         plt.legend(title='Task ID', bbox_to_anchor=(1.05, 1), loc='upper left')

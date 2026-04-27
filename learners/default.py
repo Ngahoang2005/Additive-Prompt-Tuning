@@ -458,7 +458,8 @@ class NormalNN(nn.Module):
         if verbal and task_in is None:
             self.log(f'>>> Global Routing Acc: {routing_acc.avg * 100:.2f}%')
             
-        return acc.avg    def _create_class_to_task_mapping(self):
+        return acc.avg    
+    def _create_class_to_task_mapping(self):
         mapping = torch.zeros(self.out_dim, dtype=torch.long).cuda()
         for t_idx, class_list in enumerate(self.tasks):
             for c in class_list: mapping[c] = t_idx

@@ -91,20 +91,28 @@ class Prompt_Learner(NormalNN):
         return 
 
     # sets model optimizers
+    # sets model optimizers
     def init_optimizer(self):
 
         # parse optimizer args
         # Multi-GPU
         if len(self.config['gpuid']) > 1:
-            params_to_opt = list(self.model.module.prompt.parameters()) + list(self.model.module.last.parameters()) + list(self.task_anchors.parameters())
+            params_to_opt = list(self.model.module.prompt.parameters()) + list(self.model.module.last.parameters())
         else:
-            # ---> BỔ SUNG list(self.task_anchors.parameters()) VÀO ĐÂY <---
-            params_to_opt = list(self.model.prompt.parameters()) + list(self.model.last.parameters()) + list(self.task_anchors.parameters())
+            params_to_opt = list(self.model.prompt.parameters()) + list(self.model.last.parameters())
+        
+        # =====================================================================
+        # FIX LỖI: Cực kỳ an toàn - Chỉ gộp mỏ neo NẾU nó đã được sinh ra
+        # =====================================================================
         if hasattr(self, 'task_anchors'):
             params_to_opt = params_to_opt + list(self.task_anchors.parameters())
+        # =====================================================================
+
+        print('*****************************************')
         optimizer_arg = {'params':params_to_opt,
                          'lr':self.config['lr'],
                          'weight_decay':self.config['weight_decay']}
+                         
         if self.config['optimizer'] in ['SGD','RMSprop']:
             optimizer_arg['momentum'] = self.config['momentum']
         elif self.config['optimizer'] in ['Rprop']:
@@ -122,8 +130,7 @@ class Prompt_Learner(NormalNN):
         if self.schedule_type == 'cosine':
             self.scheduler = CosineSchedule(self.optimizer, K=self.schedule[-1])
         elif self.schedule_type == 'decay':
-            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=self.schedule, gamma=0.1)
-
+            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=self.schedule, gamma=0.1)    
     def create_model(self):
         pass
 

@@ -410,8 +410,11 @@ class NormalNN(nn.Module):
                     query = model.extract_cls_features(input, use_merge=True)
                     query_norm = F.normalize(query, p=2, dim=1)
                     # Chèn vào trước dòng 414
-                    print(f"DEBUG: Current task_anchors keys: {self.task_anchors.keys()}")
-                    print(f"DEBUG: Attempting to stack anchors for tasks up to: {t}")
+                    # Thay thế đoạn print gây lỗi bằng đoạn này:
+                    print(f"DEBUG: task_anchors keys available: {list(self.task_anchors.keys())}")
+                    # Nếu learner có thuộc tính task_id, hãy in nó ra để biết bạn đang ở task nào
+                    if hasattr(self, 'task_id'):
+                        print(f"DEBUG: Current evaluating task_id: {self.task_id}")
                     anchors = torch.stack([F.normalize(self.task_anchors[str(t)], p=2, dim=0) 
                                          for t in range(len(self.task_anchors))])
                     sim_matrix = torch.matmul(query_norm, anchors.t())

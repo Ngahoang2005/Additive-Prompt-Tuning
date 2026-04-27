@@ -409,8 +409,9 @@ class NormalNN(nn.Module):
                 if task_in is None:
                     query = model.extract_cls_features(input, use_merge=True)
                     query_norm = F.normalize(query, p=2, dim=1)
-                    
-                    # 1. Thu thập Anchor và Tính Similarity
+                    # Chèn vào trước dòng 414
+                    print(f"DEBUG: Current task_anchors keys: {self.task_anchors.keys()}")
+                    print(f"DEBUG: Attempting to stack anchors for tasks up to: {t}")
                     anchors = torch.stack([F.normalize(self.task_anchors[str(t)], p=2, dim=0) 
                                          for t in range(len(self.task_anchors))])
                     sim_matrix = torch.matmul(query_norm, anchors.t())

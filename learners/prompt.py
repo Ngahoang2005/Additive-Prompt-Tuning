@@ -100,6 +100,8 @@ class Prompt_Learner(NormalNN):
         else:
             # ---> BỔ SUNG list(self.task_anchors.parameters()) VÀO ĐÂY <---
             params_to_opt = list(self.model.prompt.parameters()) + list(self.model.last.parameters()) + list(self.task_anchors.parameters())
+        if hasattr(self, 'task_anchors'):
+            params_to_opt = params_to_opt + list(self.task_anchors.parameters())
         optimizer_arg = {'params':params_to_opt,
                          'lr':self.config['lr'],
                          'weight_decay':self.config['weight_decay']}

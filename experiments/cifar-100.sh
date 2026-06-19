@@ -34,7 +34,8 @@ for seed in "${SEED_LIST[@]}"
 
         echo "Starting experiment with seed=$seed"
         
-        nohup env PYTHONUNBUFFERED=1 python -u run.py \
+        echo "Starting experiment with seed=$seed"
+        python -u run.py \
             --config $CONFIG \
             --gpuid $GPUID \
             --repeat $REPEAT \
@@ -46,14 +47,8 @@ for seed in "${SEED_LIST[@]}"
             --seed $seed \
             --ema_coeff $EMA_COEFF \
             --schedule $SCHEDULE \
-            --log_dir ${OUTDIR} > "$LOG_FILE" 2>&1 &
+            --log_dir ${OUTDIR}
 
-        # Store the PID of the background process
-        PID=$!
-        
-        # Wait for process to complete
-        wait $PID
-        
         # Check if process completed successfully
         if [ $? -eq 0 ]; then
             echo "Experiment completed successfully"

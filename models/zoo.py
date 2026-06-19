@@ -54,7 +54,7 @@ class APT(nn.Module):
         alpha_expanded = alpha.repeat_interleave(2)       # (24,)
         alpha_expanded = alpha_expanded.unsqueeze(1)      # (24, 1) để broadcast với (24, emb_d)
         return alpha_expanded * prompt1 + (1 - alpha_expanded) * prompt2
-        def _init_smart(self, prompt_param):
+    def _init_smart(self, prompt_param):
             self.prompt_dropout_ratio = float(prompt_param[0])
             self.prompt_dropout = nn.Dropout(self.prompt_dropout_ratio)
 

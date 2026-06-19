@@ -5,10 +5,10 @@ DATASET=StanfordCars
 N_CLASS=196
 
 # hard coded inputs
-GPUID='4'
+GPUID='0'
 CONFIG=configs/stanfordcars_prompt.yaml
 REPEAT=1
-OVERWRITE=0
+OVERWRITE=1
 
 # hyperparameter arrays
 LR=0.005

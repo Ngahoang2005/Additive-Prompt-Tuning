@@ -5,10 +5,10 @@ DATASET=CUB200
 N_CLASS=200
 
 # hard coded inputs
-GPUID='5'
+GPUID='0'
 CONFIG=configs/cub200_prompt.yaml
 REPEAT=1
-OVERWRITE=0
+OVERWRITE=1
 
 # hyperparameter arrays
 LR=0.02

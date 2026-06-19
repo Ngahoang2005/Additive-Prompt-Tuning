@@ -5,10 +5,10 @@ DATASET=cifar-100
 N_CLASS=100
 
 # hard coded inputs
-GPUID='6'
+GPUID='0'
 CONFIG=configs/cifar-100_prompt.yaml
 REPEAT=1
-OVERWRITE=0
+OVERWRITE=1
 
 # hyperparameter arrays
 LR=0.004

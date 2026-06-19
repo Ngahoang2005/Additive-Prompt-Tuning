@@ -129,9 +129,44 @@ class NormalNN(nn.Module):
                 # reset
                 losses = AverageMeter()
                 acc = AverageMeter()
-
-                                         
-        self.model.train()
+        
+        if self.last_valid_out_dim > 0 and hasattr(self.model.prompt, 'alpha_logits'):
+            self.log('Optimizing per-layer alpha ...')
+            
+            # Freeze tất cả trừ alpha_logits
+            for name, param in self.model.named_parameters():
+                param.requires_grad_(name == 'prompt.alpha_logits')
+            
+            alpha_optimizer = torch.optim.Adam(
+                [self.model.prompt.alpha_logits], lr=1e-2
+            )
+            
+            self.model.train()
+            # 5 epoch nhẹ, chỉ trên train_loader (không cần val riêng)
+            for _ in range(5):
+                for x_a, y_a, _ in train_loader:
+                    if self.gpu:
+                        x_a, y_a = x_a.cuda(), y_a.cuda()
+                    logits_a = self.model(x_a, train=True)[:, :self.valid_out_dim]
+                    logits_a[:, :self.last_valid_out_dim] = -float('inf')
+                    loss_a = self.criterion(logits_a, y_a.long())
+                    alpha_optimizer.zero_grad()
+                    loss_a.backward()
+                    alpha_optimizer.step()
+            
+            # Restore requires_grad về trạng thái ban đầu
+            for name, param in self.model.named_parameters():
+                param.requires_grad_(name in [
+                    'prompt.prompt_tokens', 'prompt.alpha_logits',
+                    'clf_norm.weight', 'clf_norm.bias',
+                    'last.weight', 'last.bias'
+                ])
+            
+            # Log giá trị alpha để debug
+            learned_alpha = torch.sigmoid(self.model.prompt.alpha_logits).detach().cpu()
+            self.log(f'Learned alpha per layer: {learned_alpha.numpy().round(3)}')
+                                                
+        #self.model.train()
 
         merge_flag = self.model.prompt.merge_flag
 

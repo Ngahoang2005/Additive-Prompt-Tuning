@@ -34,6 +34,8 @@ class APT(nn.Module):
         self.register_buffer('global_merged_prompt', global_merged_prompt.clone().detach()) 
 
         trunc_normal_(self.prompt_tokens, std=0.02)
+        # Per-layer learnable α, init ở 2.0 → sigmoid(2.0) ≈ 0.88 ≈ gần với α=0.8 của paper
+        self.alpha_logits = nn.Parameter(torch.full((12,), 2.0), requires_grad=True)
 
         for i in range(12):
             setattr(self, f'k_layer_proj{i}', nn.Linear(2, 2))
@@ -41,12 +43,20 @@ class APT(nn.Module):
          
    
     def merge_prompt(self, prompt1, prompt2):
+        """
+        prompt1, prompt2: shape (24, emb_d) — 12 layers × 2 (k, v)
+        alpha_logits: shape (12,) → sigmoid → alpha_l per layer
+        Expand: layer l → indices [l*2, l*2+1]
+        """
         print("Merging prompt ... ")
-        return prompt1*self.ema_coeff + prompt2*(1-self.ema_coeff)
-
-    def _init_smart(self, prompt_param):
-        self.prompt_dropout_ratio = float(prompt_param[0])
-        self.prompt_dropout = nn.Dropout(self.prompt_dropout_ratio)
+        alpha = torch.sigmoid(self.alpha_logits)          # (12,)
+        # Mỗi layer l có 2 prompt (k và v), cần repeat để match shape (24,)
+        alpha_expanded = alpha.repeat_interleave(2)       # (24,)
+        alpha_expanded = alpha_expanded.unsqueeze(1)      # (24, 1) để broadcast với (24, emb_d)
+        return alpha_expanded * prompt1 + (1 - alpha_expanded) * prompt2
+        def _init_smart(self, prompt_param):
+            self.prompt_dropout_ratio = float(prompt_param[0])
+            self.prompt_dropout = nn.Dropout(self.prompt_dropout_ratio)
 
     def process_task_count(self):
         self.task_count += 1
@@ -129,6 +139,7 @@ class ViTZoo(nn.Module):
             tuned_params = [
             "clf_norm.weight","clf_norm.bias",
             "prompt.prompt_tokens",
+            "prompt.alpha_logits",
             "last.weight",
             "last.bias", 
             ] 

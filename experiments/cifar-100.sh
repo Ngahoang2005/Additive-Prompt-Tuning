@@ -34,7 +34,7 @@ for seed in "${SEED_LIST[@]}"
 
         echo "Starting experiment with seed=$seed"
         
-        nohup python -u run.py \
+        nohup env PYTHONUNBUFFERED=1 python -u run.py \
             --config $CONFIG \
             --gpuid $GPUID \
             --repeat $REPEAT \

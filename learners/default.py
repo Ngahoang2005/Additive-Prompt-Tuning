@@ -169,43 +169,55 @@ class NormalNN(nn.Module):
         except:
             return None
 
-    def _compute_prompt_fisher(self, train_loader):
+    def _compute_prompt_fisher(self, train_loader, use_logits_reversal=True):
         """
-        Tính diagonal Fisher Information của prompt_tokens
-        trên train_loader hiện tại.
+        Tính diagonal Fisher với EWC-DR Logits Reversal.
         
-        F[j] = (1/N) * sum_{x,y} (d loss / d prompt[j])^2
+        Thay vì: loss = CE(logits, y)       → gradient vanishing khi confident
+        Dùng:    loss = CE(-logits, y)      → gradient luôn lớn (EWC-DR)
         
-        Returns: fisher (24, d) — cùng shape với prompt_tokens
+        Returns: fisher (24, d)
         """
         self.model.eval()
-        
-        prompt = self.model.prompt.prompt_tokens  # (24, d)
+        prompt = self.model.prompt.prompt_tokens   # (24, d)
         fisher = torch.zeros_like(prompt)
         n_samples = 0
 
         for x, y, _ in train_loader:
             if self.gpu:
                 x, y = x.cuda(), y.cuda()
-            
-            # Forward — cần gradient qua prompt
-            logits = self.model(x, train=True)[:, :self.valid_out_dim]
-            
-            # Log-likelihood = -CrossEntropy (reduction='sum' để tổng đúng)
-            log_likelihood = -F.cross_entropy(logits, y.long(), reduction='sum')
-            
+
+            # Forward lấy logits trước classifier normalize
+            # Cần raw logits — forward đến trước bước normalize
+            out = self.model.feat(x, prompt=self.model.prompt, train=True)
+            out = out[:, 0, :]
+            out = self.model.clf_norm(out)
+            logits = torch.matmul(out, F.normalize(self.model.last.weight, p=2, dim=1).t())
+            logits = logits[:, :self.valid_out_dim]
+
+            if use_logits_reversal:
+                # EWC-DR: negate logits → tránh gradient vanishing
+                logits_for_fisher = -logits
+            else:
+                logits_for_fisher = logits
+
+            log_likelihood = -F.cross_entropy(
+                logits_for_fisher, y.long(), reduction='sum'
+            )
+
             self.model.zero_grad()
             log_likelihood.backward()
-            
+
             if prompt.grad is not None:
                 fisher += prompt.grad.detach() ** 2
-            
+
             n_samples += y.size(0)
-        
+
         fisher /= max(n_samples, 1)
-        
         self.model.train()
-        return fisher.detach()  
+        return fisher.detach()
+        
+    
     def criterion(self, logits, targets): # data_weights [32]
         loss_supervised = (self.criterion_fn(logits, targets.long())).mean()
         return loss_supervised 

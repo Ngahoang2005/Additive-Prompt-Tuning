@@ -34,6 +34,8 @@ class APT(nn.Module):
         self.register_buffer('global_merged_prompt', global_merged_prompt.clone().detach()) 
 
         trunc_normal_(self.prompt_tokens, std=0.02)
+        accumulated_fisher = torch.zeros(12*2, emb_d)
+        self.register_buffer('accumulated_fisher', accumulated_fisher)
         # Per-layer learnable α, init ở 2.0 → sigmoid(2.0) ≈ 0.88 ≈ gần với α=0.8 của paper
         self.alpha_logits = nn.Parameter(torch.full((12,), 2.0), requires_grad=True)
 
@@ -42,18 +44,58 @@ class APT(nn.Module):
             setattr(self, f'v_layer_proj{i}', nn.Linear(2, 2))
          
    
-    def merge_prompt(self, prompt1, prompt2):
+    def merge_prompt(self, prompt_old, prompt_new, fisher_new):
         """
-        prompt1, prompt2: shape (24, emb_d) — 12 layers × 2 (k, v)
-        alpha_logits: shape (12,) → sigmoid → alpha_l per layer
-        Expand: layer l → indices [l*2, l*2+1]
+        Tính alpha per-layer theo closed-form từ Fisher Information.
+        
+        prompt_old, prompt_new : (24, d)
+        fisher_new             : (24, d)  — diagonal Fisher của task hiện tại
+        self.accumulated_fisher: (24, d)  — Fisher tích lũy từ task cũ
+        
+        Công thức:
+            alpha_l* = sum_j[ F_old[l,j] * delta[l,j]^2 ]
+                    / sum_j[ (F_old[l,j] + F_new[l,j]) * delta[l,j]^2 ]
+        
+        Với l chạy từ 0..11, mỗi layer chiếm 2 hàng (k và v),
+        nên group theo cặp [2l, 2l+1].
         """
-        print("Merging prompt ... ")
-        alpha = torch.sigmoid(self.alpha_logits)          # (12,)
-        # Mỗi layer l có 2 prompt (k và v), cần repeat để match shape (24,)
-        alpha_expanded = alpha.repeat_interleave(2)       # (24,)
-        alpha_expanded = alpha_expanded.unsqueeze(1)      # (24, 1) để broadcast với (24, emb_d)
-        return alpha_expanded * prompt1 + (1 - alpha_expanded) * prompt2
+        print("Merging prompt with Fisher-based per-layer alpha ...")
+
+        delta = prompt_new - prompt_old          # (24, d)
+        delta_sq = delta ** 2                    # (24, d)
+
+        F_old = self.accumulated_fisher          # (24, d)
+        F_new = fisher_new                       # (24, d)
+
+        alpha_per_row = torch.zeros(24, device=prompt_old.device)
+
+        for l in range(12):
+            rows = [l*2, l*2+1]   # k-row và v-row của layer l
+
+            num   = (F_old[rows] * delta_sq[rows]).sum()
+            denom = ((F_old[rows] + F_new[rows]) * delta_sq[rows]).sum()
+
+            if denom < 1e-10:
+                # Nếu delta ≈ 0 (prompt không đổi) → giữ nguyên
+                alpha_l = torch.tensor(1.0, device=prompt_old.device)
+            else:
+                alpha_l = num / denom
+                alpha_l = alpha_l.clamp(0.0, 1.0)
+
+            alpha_per_row[rows[0]] = alpha_l
+            alpha_per_row[rows[1]] = alpha_l
+
+            print(f"  Layer {l:02d}: alpha={alpha_l.item():.4f}  "
+                f"(F_old={F_old[rows].mean().item():.4f}, "
+                f"F_new={F_new[rows].mean().item():.4f})")
+
+        alpha = alpha_per_row.unsqueeze(1)       # (24, 1)
+        merged = alpha * prompt_old + (1 - alpha) * prompt_new
+
+        # Cập nhật accumulated Fisher: F_acc = F_old + F_new
+        self.accumulated_fisher = F_old + F_new
+
+        return merged 
     def _init_smart(self, prompt_param):
             self.prompt_dropout_ratio = float(prompt_param[0])
             self.prompt_dropout = nn.Dropout(self.prompt_dropout_ratio)

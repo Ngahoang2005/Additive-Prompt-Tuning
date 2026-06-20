@@ -130,73 +130,30 @@ class NormalNN(nn.Module):
                 losses = AverageMeter()
                 acc = AverageMeter()
         
-        # ── Optimize per-layer alpha trực tiếp trên merged prompt ──────────
-        if self.last_valid_out_dim > 0 and hasattr(self.model, 'prompt') \
-                and hasattr(self.model.prompt, 'alpha_logits'):
-
-            self.log('Optimizing per-layer alpha ...')
-
-            # Snapshot 2 prompt cần merge — detach khỏi graph cũ
-            old_p  = self.model.prompt.global_merged_prompt.detach().clone()  # (24, d)
-            new_p  = self.model.prompt.prompt_tokens.detach().clone()         # (24, d)
-
-            # Reset alpha_logits grad
-            self.model.prompt.alpha_logits.grad = None
-
-            alpha_optimizer = torch.optim.Adam(
-                [self.model.prompt.alpha_logits], lr=1e-2
-            )
-
-            self.model.eval()
-            for _ in range(10):
-                for x_a, y_a, _ in train_loader:
-                    if self.gpu:
-                        x_a, y_a = x_a.cuda(), y_a.cuda()
-
-                    # Tính merged prompt CÓ gradient qua alpha_logits
-                    alpha = torch.sigmoid(self.model.prompt.alpha_logits)   # (12,)
-                    alpha_exp = alpha.repeat_interleave(2).unsqueeze(1)     # (24,1)
-                    merged = alpha_exp * old_p + (1 - alpha_exp) * new_p   # (24, d)
-
-                    # Tạm thời gán merged vào global_merged_prompt để forward dùng
-                    self.model.prompt.global_merged_prompt = merged
-
-                    with torch.no_grad():
-                        # Chỉ alpha_logits có grad, model frozen hoàn toàn
-                        pass
-
-                    # Forward ở inference mode (train=False) → dùng global_merged_prompt
-                    logits_a = self.model(x_a, train=False)[:, :self.valid_out_dim]
-                    loss_a = self.criterion_fn(logits_a, y_a.long()).mean()
-
-                    alpha_optimizer.zero_grad()
-                    loss_a.backward()
-                    alpha_optimizer.step()
-
-            # Ghi learned alpha, restore global_merged_prompt đúng
-            learned_alpha = torch.sigmoid(
-                self.model.prompt.alpha_logits
-            ).detach().cpu()
-            self.log(f'Learned alpha per layer: {learned_alpha.numpy().round(3)}')
-
-            # Restore global_merged_prompt về buffer (detach)
-            self.model.prompt.global_merged_prompt = \
-                self.model.prompt.global_merged_prompt.detach()
-        # ────────────────────────────────────────────────────────────────────
-
         self.model.train()
         merge_flag = self.model.prompt.merge_flag
 
         if merge_flag:
             if self.last_valid_out_dim == 0:
-                self.model.prompt.global_merged_prompt = self.model.prompt.prompt_tokens.clone().detach()
-            else:
-                now_task_p = self.model.prompt.prompt_tokens.clone().detach()
-                global_p = self.model.prompt.global_merged_prompt
-                merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
+                # Task 1: chỉ lưu prompt, chưa có gì để merge
+                self.model.prompt.global_merged_prompt = \
+                    self.model.prompt.prompt_tokens.clone().detach()
                 
+                # Tính và lưu Fisher task 1 vào accumulated_fisher
+                fisher_task1 = self._compute_prompt_fisher(train_loader)
+                self.model.prompt.accumulated_fisher = fisher_task1
+                
+            else:
+                # Task t≥2: tính Fisher task mới rồi merge
+                fisher_new = self._compute_prompt_fisher(train_loader)
+                
+                now_task_p = self.model.prompt.prompt_tokens.clone().detach()
+                global_p   = self.model.prompt.global_merged_prompt
+                
+                merged_p = self.model.prompt.merge_prompt(
+                    global_p, now_task_p, fisher_new
+                )
                 self.model.prompt.global_merged_prompt.data = merged_p
-            
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim
@@ -211,7 +168,44 @@ class NormalNN(nn.Module):
             return batch_time.avg
         except:
             return None
+
+    def _compute_prompt_fisher(self, train_loader):
+        """
+        Tính diagonal Fisher Information của prompt_tokens
+        trên train_loader hiện tại.
         
+        F[j] = (1/N) * sum_{x,y} (d loss / d prompt[j])^2
+        
+        Returns: fisher (24, d) — cùng shape với prompt_tokens
+        """
+        self.model.eval()
+        
+        prompt = self.model.prompt.prompt_tokens  # (24, d)
+        fisher = torch.zeros_like(prompt)
+        n_samples = 0
+
+        for x, y, _ in train_loader:
+            if self.gpu:
+                x, y = x.cuda(), y.cuda()
+            
+            # Forward — cần gradient qua prompt
+            logits = self.model(x, train=True)[:, :self.valid_out_dim]
+            
+            # Log-likelihood = -CrossEntropy (reduction='sum' để tổng đúng)
+            log_likelihood = -F.cross_entropy(logits, y.long(), reduction='sum')
+            
+            self.model.zero_grad()
+            log_likelihood.backward()
+            
+            if prompt.grad is not None:
+                fisher += prompt.grad.detach() ** 2
+            
+            n_samples += y.size(0)
+        
+        fisher /= max(n_samples, 1)
+        
+        self.model.train()
+        return fisher.detach()  
     def criterion(self, logits, targets): # data_weights [32]
         loss_supervised = (self.criterion_fn(logits, targets.long())).mean()
         return loss_supervised 

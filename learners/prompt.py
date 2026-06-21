@@ -146,7 +146,7 @@ class APT_Learner(Prompt_Learner):
         """
         if len(self.class_stats) == 0:
             return
-        
+        w_before = self.model.last.weight.data.clone()
         self.log(f'Running Classifier Alignment on {len(self.class_stats)} classes...')
         self.model.eval()
         
@@ -216,11 +216,13 @@ class APT_Learner(Prompt_Learner):
                 logits = logits[:, :self.valid_out_dim]
                 
                 loss = self.criterion(logits, label_batch)
-                
+                w_current = self.model.last.weight
+                anchor_loss = F.mse_loss(w_current, w_before.detach())
+                loss = loss + 0.1 * anchor_loss 
                 ca_optimizer.zero_grad()
                 loss.backward()
                 ca_optimizer.step()
-                
+
                 total_ca_loss += loss.item()
                 n_batches += 1
             

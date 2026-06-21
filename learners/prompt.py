@@ -139,98 +139,180 @@ class APT_Learner(Prompt_Learner):
     # -------------------------------------------------------
     # BƯỚC 2: Classifier Alignment dùng synthetic features
     # -------------------------------------------------------
+    # def classifier_alignment(self):
+    #     """
+    #     Sample synthetic features từ Gaussian(mean, std) của mỗi class đã học.
+    #     Retrain chỉ classifier head trên balanced synthetic data.
+    #     """
+    #     if len(self.class_stats) == 0:
+    #         return
+    #     w_before = self.model.last.weight.data.clone()
+    #     self.log(f'Running Classifier Alignment on {len(self.class_stats)} classes...')
+    #     self.model.eval()
+        
+    #     # Chỉ optimize classifier (last layer + clf_norm)
+    #     if len(self.config['gpuid']) > 1:
+    #         ca_params = (list(self.model.module.last.parameters()) + 
+    #                     list(self.model.module.clf_norm.parameters()))
+    #     else:
+    #         ca_params = (list(self.model.last.parameters()) + 
+    #                     list(self.model.clf_norm.parameters()))
+        
+    #     ca_optimizer = torch.optim.Adam(ca_params, lr=0.01)
+        
+    #     # Build balanced synthetic dataset
+    #     all_classes = sorted(self.class_stats.keys())
+        
+    #     for epoch in range(self.ca_epochs):
+    #         # Sample synthetic features cho tất cả classes
+    #         syn_feats_list = []
+    #         syn_labels_list = []
+            
+    #         for cls_idx in all_classes:
+    #             mean = self.class_stats[cls_idx]['mean']  # [768]
+    #             std  = self.class_stats[cls_idx]['std']   # [768]
+                
+    #             if self.gpu:
+    #                 mean = mean.cuda()
+    #                 std  = std.cuda()
+                
+    #             # Sample từ Gaussian distribution
+    #             noise = torch.randn(
+    #                 self.ca_n_samples, mean.shape[0],
+    #                 device=mean.device
+    #             )
+    #             syn_feat = mean.unsqueeze(0) + noise * std.unsqueeze(0)  # [N, 768]
+    #             syn_label = torch.full(
+    #                 (self.ca_n_samples,), cls_idx,
+    #                 dtype=torch.long,
+    #                 device=mean.device
+    #             )
+                
+    #             syn_feats_list.append(syn_feat)
+    #             syn_labels_list.append(syn_label)
+            
+    #         # Concat tất cả classes
+    #         syn_feats  = torch.cat(syn_feats_list,  dim=0)  # [N*C, 768]
+    #         syn_labels = torch.cat(syn_labels_list, dim=0)  # [N*C]
+            
+    #         # Shuffle
+    #         perm = torch.randperm(syn_feats.shape[0])
+    #         syn_feats  = syn_feats[perm]
+    #         syn_labels = syn_labels[perm]
+            
+    #         # Mini-batch update chỉ trên classifier
+    #         batch_size = 128
+    #         total_ca_loss = 0.0
+    #         n_batches = 0
+            
+    #         for start in range(0, syn_feats.shape[0], batch_size):
+    #             end = min(start + batch_size, syn_feats.shape[0])
+    #             feat_batch  = syn_feats[start:end]
+    #             label_batch = syn_labels[start:end]
+                
+    #             # Forward qua classifier (không qua backbone/prompt)
+    #             wt_norm = F.normalize(self.model.last.weight, p=2, dim=1)
+    #             logits = torch.matmul(feat_batch, wt_norm.t())
+    #             logits = logits[:, :self.valid_out_dim]
+                
+    #             loss = self.criterion(logits, label_batch)
+    #             w_current = self.model.last.weight
+    #             anchor_loss = F.mse_loss(w_current, w_before.detach())
+    #             loss = loss + 0.1 * anchor_loss 
+    #             ca_optimizer.zero_grad()
+    #             loss.backward()
+    #             ca_optimizer.step()
+
+    #             total_ca_loss += loss.item()
+    #             n_batches += 1
+            
+    #         self.log(f'  CA Epoch {epoch+1}/{self.ca_epochs} | Loss: {total_ca_loss/n_batches:.4f}')
+        
+    #     self.model.train()
+    #     self.log('Classifier Alignment done.')
     def classifier_alignment(self):
-        """
-        Sample synthetic features từ Gaussian(mean, std) của mỗi class đã học.
-        Retrain chỉ classifier head trên balanced synthetic data.
-        """
         if len(self.class_stats) == 0:
             return
+
         w_before = self.model.last.weight.data.clone()
         self.log(f'Running Classifier Alignment on {len(self.class_stats)} classes...')
         self.model.eval()
-        
-        # Chỉ optimize classifier (last layer + clf_norm)
+
         if len(self.config['gpuid']) > 1:
-            ca_params = (list(self.model.module.last.parameters()) + 
+            ca_params = (list(self.model.module.last.parameters()) +
                         list(self.model.module.clf_norm.parameters()))
         else:
-            ca_params = (list(self.model.last.parameters()) + 
+            ca_params = (list(self.model.last.parameters()) +
                         list(self.model.clf_norm.parameters()))
-        
+
         ca_optimizer = torch.optim.Adam(ca_params, lr=0.01)
-        
-        # Build balanced synthetic dataset
         all_classes = sorted(self.class_stats.keys())
-        
+
+        # Temperature cho logit normalization — τ=0.1 theo SLCA paper
+        tau = 0.1
+
         for epoch in range(self.ca_epochs):
-            # Sample synthetic features cho tất cả classes
             syn_feats_list = []
             syn_labels_list = []
-            
+
             for cls_idx in all_classes:
-                mean = self.class_stats[cls_idx]['mean']  # [768]
-                std  = self.class_stats[cls_idx]['std']   # [768]
-                
+                mean = self.class_stats[cls_idx]['mean']
+                std  = self.class_stats[cls_idx]['std']
                 if self.gpu:
                     mean = mean.cuda()
                     std  = std.cuda()
-                
-                # Sample từ Gaussian distribution
-                noise = torch.randn(
-                    self.ca_n_samples, mean.shape[0],
-                    device=mean.device
-                )
-                syn_feat = mean.unsqueeze(0) + noise * std.unsqueeze(0)  # [N, 768]
+                noise = torch.randn(self.ca_n_samples, mean.shape[0], device=mean.device)
+                syn_feat  = mean.unsqueeze(0) + noise * std.unsqueeze(0)
                 syn_label = torch.full(
                     (self.ca_n_samples,), cls_idx,
-                    dtype=torch.long,
-                    device=mean.device
+                    dtype=torch.long, device=mean.device
                 )
-                
                 syn_feats_list.append(syn_feat)
                 syn_labels_list.append(syn_label)
-            
-            # Concat tất cả classes
-            syn_feats  = torch.cat(syn_feats_list,  dim=0)  # [N*C, 768]
-            syn_labels = torch.cat(syn_labels_list, dim=0)  # [N*C]
-            
-            # Shuffle
+
+            syn_feats  = torch.cat(syn_feats_list,  dim=0)
+            syn_labels = torch.cat(syn_labels_list, dim=0)
             perm = torch.randperm(syn_feats.shape[0])
             syn_feats  = syn_feats[perm]
             syn_labels = syn_labels[perm]
-            
-            # Mini-batch update chỉ trên classifier
+
             batch_size = 128
             total_ca_loss = 0.0
             n_batches = 0
-            
+
             for start in range(0, syn_feats.shape[0], batch_size):
                 end = min(start + batch_size, syn_feats.shape[0])
                 feat_batch  = syn_feats[start:end]
                 label_batch = syn_labels[start:end]
-                
-                # Forward qua classifier (không qua backbone/prompt)
+
                 wt_norm = F.normalize(self.model.last.weight, p=2, dim=1)
-                logits = torch.matmul(feat_batch, wt_norm.t())
-                logits = logits[:, :self.valid_out_dim]
-                
-                loss = self.criterion(logits, label_batch)
+                logits  = torch.matmul(feat_batch, wt_norm.t())
+                logits  = logits[:, :self.valid_out_dim]
+
+                # ---- THAY ĐỔI CHÍNH: Logit-normalized CE thay vì CE thường ----
+                # Normalize mỗi sample's logit vector bằng norm của nó
+                logit_norm = logits.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
+                logits_normalized = logits / (tau * logit_norm)
+                loss = F.cross_entropy(logits_normalized, label_batch)
+                # -----------------------------------------------------------------
+
+                # Anchor loss giữ nguyên — giúp không drift quá xa
                 w_current = self.model.last.weight
                 anchor_loss = F.mse_loss(w_current, w_before.detach())
-                loss = loss + 0.1 * anchor_loss 
+                loss = loss + 0.1 * anchor_loss
+
+
                 ca_optimizer.zero_grad()
                 loss.backward()
                 ca_optimizer.step()
 
                 total_ca_loss += loss.item()
                 n_batches += 1
-            
+
             self.log(f'  CA Epoch {epoch+1}/{self.ca_epochs} | Loss: {total_ca_loss/n_batches:.4f}')
-        
+
         self.model.train()
         self.log('Classifier Alignment done.')
-
     # -------------------------------------------------------
     # Override learn_batch để thêm CA sau mỗi task
     # -------------------------------------------------------

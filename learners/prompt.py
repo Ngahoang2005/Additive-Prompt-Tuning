@@ -70,255 +70,157 @@ class APT_Learner(Prompt_Learner):
 
     def __init__(self, learner_config):
         super(APT_Learner, self).__init__(learner_config)
-        
-        # Lưu class statistics cho Classifier Alignment
-        # key: class_idx, value: {'mean': tensor [768], 'std': tensor [768]}
-        self.class_stats = {}
-        
-        # Số synthetic samples per class khi align
-        self.ca_n_samples = learner_config.get('ca_n_samples', 256)
-        
-        # Số epochs để retrain classifier khi align
-        self.ca_epochs = learner_config.get('ca_epochs', 5)
 
-    def create_model(self):
-        cfg = self.config
-        model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](
-            out_dim=self.out_dim,
-            ema_coeff=self.ema_coeff,
-            prompt_flag='apt',
-            prompt_param=self.prompt_param,
-            tasks=self.tasks
-        )
-        return model
+        # Ridge regression components
+        # G = Φ^T Φ (Gram matrix), C = Φ^T Y (cross matrix)
+        self.ridge_lambda = learner_config.get('ridge_lambda', 1.0)
+        self.rp_dim = learner_config.get('rp_dim', 768)  # dim sau random projection
 
-    # -------------------------------------------------------
-    # BƯỚC 1: Thu thập CLS embeddings sau khi train xong task
-    # -------------------------------------------------------
-    @torch.no_grad()
-    def collect_class_stats(self, train_loader):
+        # Random projection matrix — frozen, init once
+        # None cho đến khi biết emb_d
+        self.W_rand = None
+
+        # Gram và cross matrices — tích lũy qua tasks
+        self.G = None  # [rp_dim, rp_dim]
+        self.C = None  # [rp_dim, num_classes]
+
+    def _init_random_projection(self, emb_d, device):
+        """Khởi tạo W_rand một lần duy nhất."""
+        if self.W_rand is None:
+            W = torch.randn(emb_d, self.rp_dim, device=device)
+            # Normalize columns
+            W = W / W.norm(dim=0, keepdim=True).clamp(min=1e-8)
+            self.W_rand = W  # frozen, không train
+            self.log(f'Random projection: {emb_d} -> {self.rp_dim}')
+
+    def _random_project(self, feat):
         """
-        Chạy toàn bộ train_loader qua model (với merged prompt),
-        lưu mean và std của CLS embedding cho mỗi class.
+        feat: [B, emb_d]
+        return: [B, rp_dim] sau ReLU(feat @ W_rand)
+        """
+        return F.relu(feat @ self.W_rand)
+
+    @torch.no_grad()
+    def update_gram_matrices(self, train_loader, task_classes):
+        """
+        Tích lũy Gram matrix G và cross matrix C từ task hiện tại.
+        Dùng merged prompt (inference mode).
         """
         self.model.eval()
-        
-        # Accumulate features per class
-        class_feats = {}  # class_idx -> list of [768] tensors
-        
-        for i, (x, y, task) in enumerate(train_loader):
+        num_total_classes = self.valid_out_dim
+
+        # Init C nếu chưa có hoặc cần expand
+        if self.C is None:
+            self.C = torch.zeros(self.rp_dim, num_total_classes)
+        elif self.C.shape[1] < num_total_classes:
+            # Expand C để accommodate new classes
+            pad = torch.zeros(self.rp_dim, num_total_classes - self.C.shape[1])
+            self.C = torch.cat([self.C, pad], dim=1)
+
+        if self.G is None:
+            self.G = torch.zeros(self.rp_dim, self.rp_dim)
+
+        for x, y, task in train_loader:
             if self.gpu:
                 x = x.cuda()
                 y = y.cuda()
-            
-            # Forward pass lấy CLS embedding (không qua classifier)
-            # model.feat trả về [B, N, 768], lấy [:, 0, :] là CLS
-            with torch.no_grad():
-                cls_feat = self.model.feat(
-                    x, prompt=self.model.prompt, train=False
-                )[:, 0, :]  # [B, 768]
-                cls_feat = self.model.clf_norm(cls_feat)  # normalize
-            
-            for feat, label in zip(cls_feat, y):
-                label_item = label.item()
-                if label_item not in class_feats:
-                    class_feats[label_item] = []
-                class_feats[label_item].append(feat.cpu())
-        
-        # Tính mean và std cho từng class
-        for cls_idx, feats in class_feats.items():
-            feats_tensor = torch.stack(feats, dim=0)  # [N, 768]
-            self.class_stats[cls_idx] = {
-                'mean': feats_tensor.mean(dim=0),   # [768]
-                'std':  feats_tensor.std(dim=0) + 1e-6  # [768], tránh std=0
-            }
-        
-        self.log(f'Collected stats for {len(self.class_stats)} classes')
+
+            # CLS embedding với merged prompt
+            feat = self.model.feat(
+                x, prompt=self.model.prompt, train=False
+            )[:, 0, :]
+            feat = self.model.clf_norm(feat)  # [B, 768]
+
+            # Init random projection nếu chưa có
+            self._init_random_projection(feat.shape[1], feat.device)
+
+            # Random project
+            phi = self._random_project(feat)  # [B, rp_dim]
+
+            # One-hot labels
+            B = y.shape[0]
+            Y_onehot = torch.zeros(B, num_total_classes, device=y.device)
+            Y_onehot.scatter_(1, y.long().unsqueeze(1), 1.0)
+
+            # Cập nhật Gram và cross matrix (incremental)
+            self.G += (phi.T @ phi).cpu()           # [rp_dim, rp_dim]
+            self.C += (phi.T @ Y_onehot).cpu()      # [rp_dim, num_classes]
+
+        self.log(f'Updated Gram matrices for {len(task_classes)} new classes')
         self.model.train()
 
-    # -------------------------------------------------------
-    # BƯỚC 2: Classifier Alignment dùng synthetic features
-    # -------------------------------------------------------
-    # def classifier_alignment(self):
-    #     """
-    #     Sample synthetic features từ Gaussian(mean, std) của mỗi class đã học.
-    #     Retrain chỉ classifier head trên balanced synthetic data.
-    #     """
-    #     if len(self.class_stats) == 0:
-    #         return
-    #     w_before = self.model.last.weight.data.clone()
-    #     self.log(f'Running Classifier Alignment on {len(self.class_stats)} classes...')
-    #     self.model.eval()
-        
-    #     # Chỉ optimize classifier (last layer + clf_norm)
-    #     if len(self.config['gpuid']) > 1:
-    #         ca_params = (list(self.model.module.last.parameters()) + 
-    #                     list(self.model.module.clf_norm.parameters()))
-    #     else:
-    #         ca_params = (list(self.model.last.parameters()) + 
-    #                     list(self.model.clf_norm.parameters()))
-        
-    #     ca_optimizer = torch.optim.Adam(ca_params, lr=0.01)
-        
-    #     # Build balanced synthetic dataset
-    #     all_classes = sorted(self.class_stats.keys())
-        
-    #     for epoch in range(self.ca_epochs):
-    #         # Sample synthetic features cho tất cả classes
-    #         syn_feats_list = []
-    #         syn_labels_list = []
-            
-    #         for cls_idx in all_classes:
-    #             mean = self.class_stats[cls_idx]['mean']  # [768]
-    #             std  = self.class_stats[cls_idx]['std']   # [768]
-                
-    #             if self.gpu:
-    #                 mean = mean.cuda()
-    #                 std  = std.cuda()
-                
-    #             # Sample từ Gaussian distribution
-    #             noise = torch.randn(
-    #                 self.ca_n_samples, mean.shape[0],
-    #                 device=mean.device
-    #             )
-    #             syn_feat = mean.unsqueeze(0) + noise * std.unsqueeze(0)  # [N, 768]
-    #             syn_label = torch.full(
-    #                 (self.ca_n_samples,), cls_idx,
-    #                 dtype=torch.long,
-    #                 device=mean.device
-    #             )
-                
-    #             syn_feats_list.append(syn_feat)
-    #             syn_labels_list.append(syn_label)
-            
-    #         # Concat tất cả classes
-    #         syn_feats  = torch.cat(syn_feats_list,  dim=0)  # [N*C, 768]
-    #         syn_labels = torch.cat(syn_labels_list, dim=0)  # [N*C]
-            
-    #         # Shuffle
-    #         perm = torch.randperm(syn_feats.shape[0])
-    #         syn_feats  = syn_feats[perm]
-    #         syn_labels = syn_labels[perm]
-            
-    #         # Mini-batch update chỉ trên classifier
-    #         batch_size = 128
-    #         total_ca_loss = 0.0
-    #         n_batches = 0
-            
-    #         for start in range(0, syn_feats.shape[0], batch_size):
-    #             end = min(start + batch_size, syn_feats.shape[0])
-    #             feat_batch  = syn_feats[start:end]
-    #             label_batch = syn_labels[start:end]
-                
-    #             # Forward qua classifier (không qua backbone/prompt)
-    #             wt_norm = F.normalize(self.model.last.weight, p=2, dim=1)
-    #             logits = torch.matmul(feat_batch, wt_norm.t())
-    #             logits = logits[:, :self.valid_out_dim]
-                
-    #             loss = self.criterion(logits, label_batch)
-    #             w_current = self.model.last.weight
-    #             anchor_loss = F.mse_loss(w_current, w_before.detach())
-    #             loss = loss + 0.1 * anchor_loss 
-    #             ca_optimizer.zero_grad()
-    #             loss.backward()
-    #             ca_optimizer.step()
-
-    #             total_ca_loss += loss.item()
-    #             n_batches += 1
-            
-    #         self.log(f'  CA Epoch {epoch+1}/{self.ca_epochs} | Loss: {total_ca_loss/n_batches:.4f}')
-        
-    #     self.model.train()
-    #     self.log('Classifier Alignment done.')
-    def classifier_alignment(self):
-        if len(self.class_stats) == 0:
+    def solve_classifier_ridge(self):
+        """
+        Giải ridge regression: W = (G + λI)^{-1} C
+        Cập nhật classifier weights của model.
+        """
+        if self.G is None or self.C is None:
             return
 
-        w_before = self.model.last.weight.data.clone()
-        self.log(f'Running Classifier Alignment on {len(self.class_stats)} classes...')
-        self.model.eval()
+        self.log('Solving ridge regression for classifier...')
+        device = self.model.last.weight.device
 
-        if len(self.config['gpuid']) > 1:
-            ca_params = (list(self.model.module.last.parameters()) +
-                        list(self.model.module.clf_norm.parameters()))
-        else:
-            ca_params = (list(self.model.last.parameters()) +
-                        list(self.model.clf_norm.parameters()))
+        G = self.G.to(device)
+        C = self.C.to(device)
 
-        ca_optimizer = torch.optim.Adam(ca_params, lr=0.01)
-        all_classes = sorted(self.class_stats.keys())
+        # W = (G + λI)^{-1} C
+        reg = self.ridge_lambda * torch.eye(self.rp_dim, device=device)
+        try:
+            W = torch.linalg.solve(G + reg, C)  # [rp_dim, num_classes]
+        except Exception:
+            # Fallback nếu singular
+            W = torch.linalg.lstsq(G + reg, C).solution
 
-        # Temperature cho logit normalization — τ=0.1 theo SLCA paper
-        tau = 0.1
+        # W.T: [num_classes, rp_dim]
+        # Cần update last layer — nhưng last layer expect [num_classes, 768]
+        # Nên ta lưu W riêng và dùng trong inference
+        self.W_ridge = W.T  # [num_classes, rp_dim]
+        self.log('Ridge regression solved.')
 
-        for epoch in range(self.ca_epochs):
-            syn_feats_list = []
-            syn_labels_list = []
+    def validation(self, dataloader, model=None, task_in=None,
+                   task_metric='acc', verbal=True, task_global=False):
+        """Override để dùng ridge classifier nếu đã có."""
+        if model is None:
+            model = self.model
 
-            for cls_idx in all_classes:
-                mean = self.class_stats[cls_idx]['mean']
-                std  = self.class_stats[cls_idx]['std']
-                if self.gpu:
-                    mean = mean.cuda()
-                    std  = std.cuda()
-                noise = torch.randn(self.ca_n_samples, mean.shape[0], device=mean.device)
-                syn_feat  = mean.unsqueeze(0) + noise * std.unsqueeze(0)
-                syn_label = torch.full(
-                    (self.ca_n_samples,), cls_idx,
-                    dtype=torch.long, device=mean.device
-                )
-                syn_feats_list.append(syn_feat)
-                syn_labels_list.append(syn_label)
+        batch_timer = Timer()
+        acc = AverageMeter()
+        batch_timer.tic()
+        orig_mode = model.training
+        model.eval()
 
-            syn_feats  = torch.cat(syn_feats_list,  dim=0)
-            syn_labels = torch.cat(syn_labels_list, dim=0)
-            perm = torch.randperm(syn_feats.shape[0])
-            syn_feats  = syn_feats[perm]
-            syn_labels = syn_labels[perm]
+        use_ridge = hasattr(self, 'W_ridge') and self.W_ridge is not None
 
-            batch_size = 128
-            total_ca_loss = 0.0
-            n_batches = 0
+        for i, (input, target, task) in enumerate(dataloader):
+            if self.gpu:
+                with torch.no_grad():
+                    input = input.cuda()
+                    target = target.cuda()
 
-            for start in range(0, syn_feats.shape[0], batch_size):
-                end = min(start + batch_size, syn_feats.shape[0])
-                feat_batch  = syn_feats[start:end]
-                label_batch = syn_labels[start:end]
+            if task_in is None:
+                with torch.no_grad():
+                    if use_ridge and self.W_rand is not None:
+                        # Ridge inference
+                        feat = model.feat(
+                            input, prompt=model.prompt, train=False
+                        )[:, 0, :]
+                        feat = model.clf_norm(feat)
+                        phi = self._random_project(feat)  # [B, rp_dim]
+                        # logits = phi @ W_ridge.T
+                        output = phi @ self.W_ridge[:self.valid_out_dim].T
+                    else:
+                        # Fallback về APT gốc
+                        output = model.forward(input)[:, :self.valid_out_dim]
 
-                wt_norm = F.normalize(self.model.last.weight, p=2, dim=1)
-                logits  = torch.matmul(feat_batch, wt_norm.t())
-                logits  = logits[:, :self.valid_out_dim]
+                acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
 
-                # ---- THAY ĐỔI CHÍNH: Logit-normalized CE thay vì CE thường ----
-                # Normalize mỗi sample's logit vector bằng norm của nó
-                logit_norm = logits.norm(p=2, dim=1, keepdim=True).clamp(min=1e-8)
-                logits_normalized = logits / (tau * logit_norm)
-                loss = F.cross_entropy(logits_normalized, label_batch)
-                # -----------------------------------------------------------------
+        model.train(orig_mode)
+        if verbal:
+            self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'.format(
+                acc=acc, time=batch_timer.toc()))
+        return acc.avg
 
-                # Anchor loss giữ nguyên — giúp không drift quá xa
-                w_current = self.model.last.weight
-                anchor_loss = F.mse_loss(w_current, w_before.detach())
-                loss = loss + 0.1 * anchor_loss
-
-
-                ca_optimizer.zero_grad()
-                loss.backward()
-                ca_optimizer.step()
-
-                total_ca_loss += loss.item()
-                n_batches += 1
-
-            self.log(f'  CA Epoch {epoch+1}/{self.ca_epochs} | Loss: {total_ca_loss/n_batches:.4f}')
-
-        self.model.train()
-        self.log('Classifier Alignment done.')
-    # -------------------------------------------------------
-    # Override learn_batch để thêm CA sau mỗi task
-    # -------------------------------------------------------
     def learn_batch(self, train_loader, train_dataset, model_save_dir):
-        
-        # Train bình thường (giữ nguyên từ default.py)
         need_train = True
         if not self.overwrite:
             try:
@@ -359,7 +261,7 @@ class APT_Learner(Prompt_Learner):
                     batch_timer.tic()
 
                 self.log('Epoch:{epoch:.0f}/{total:.0f}'.format(
-                    epoch=self.epoch + 1, total=self.config['schedule'][-1]))
+                    epoch=self.epoch+1, total=self.config['schedule'][-1]))
                 self.log(' * Loss {loss.avg:.3f} | Train Acc {acc.avg:.3f}'.format(
                     loss=losses, acc=acc))
                 losses = AverageMeter()
@@ -367,7 +269,7 @@ class APT_Learner(Prompt_Learner):
 
         self.model.train()
 
-        # PPF merge (giữ nguyên từ code gốc)
+        # PPF merge — giữ nguyên
         merge_flag = self.model.prompt.merge_flag
         if merge_flag:
             if self.last_valid_out_dim == 0:
@@ -379,16 +281,10 @@ class APT_Learner(Prompt_Learner):
                 merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
                 self.model.prompt.global_merged_prompt.data = merged_p
 
-        # -----------------------------------------------
-        # CLASSIFIER ALIGNMENT: chạy sau PPF merge
-        # -----------------------------------------------
-        # Bước 1: Thu thập stats của task hiện tại (dùng merged prompt)
-        self.collect_class_stats(train_loader)
-        
-        # Bước 2: Align classifier trên tất cả classes đã học
-        # Chỉ chạy từ task 2 trở đi (task 1 không có old classes)
-        if self.last_valid_out_dim > 0:
-            self.classifier_alignment()
+        # Ridge regression — thay CA hoàn toàn
+        task_classes = list(range(self.last_valid_out_dim, self.valid_out_dim))
+        self.update_gram_matrices(train_loader, task_classes)
+        self.solve_classifier_ridge()
 
         self.model.eval()
         self.last_valid_out_dim = self.valid_out_dim
@@ -403,3 +299,14 @@ class APT_Learner(Prompt_Learner):
             return batch_time.avg
         except:
             return None
+
+    def create_model(self):
+        cfg = self.config
+        model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](
+            out_dim=self.out_dim,
+            ema_coeff=self.ema_coeff,
+            prompt_flag='apt',
+            prompt_param=self.prompt_param,
+            tasks=self.tasks
+        )
+        return model

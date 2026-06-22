@@ -47,7 +47,7 @@ for seed in "${SEED_LIST[@]}"
             --seed $seed \
             --ema_coeff $EMA_COEFF \
             --schedule $SCHEDULE \
-            --distill_lambda 1.0 \
+            --distill_lambda 0.5 \
             --log_dir ${OUTDIR}
 
         # Check if process completed successfully

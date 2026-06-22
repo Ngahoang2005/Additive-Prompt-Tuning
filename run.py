@@ -57,7 +57,8 @@ def create_args():
     # Config Arg
     parser.add_argument('--config', type=str, default="configs/config.yaml",
                          help="yaml experiment config input")
-
+    parser.add_argument('--distill_lambda', type=float, default=1.0,
+                    help="weight of CLS distillation loss")
     return parser
 
 def get_args(argv):

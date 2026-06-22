@@ -83,6 +83,8 @@ class NormalNN(nn.Module):
         if self.reset_optimizer:  # Reset optimizer before learning each task
             self.log('Optimizer is reset!')
             self.init_optimizer()
+        if hasattr(self, 'save_frozen_model') and self.last_valid_out_dim > 0:
+            self.save_frozen_model()
         if need_train:
             
             # data weighting

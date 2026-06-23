@@ -78,7 +78,7 @@ class NullSpaceManager:
         # Tuy nhiên, grad_flat có chiều là (num_prompts * D)
         # Ta cần chiếu từng prompt một cách độc lập
         num_prompts = original_shape[0] if len(original_shape) == 2 else 1
-        D = self.feature_dim
+        D = U.shape[0]
 
         # Reshape grad về (num_prompts, D)
         grad_reshaped = grad_flat.view(num_prompts, D)

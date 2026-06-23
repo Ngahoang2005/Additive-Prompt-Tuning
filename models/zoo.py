@@ -129,14 +129,15 @@ class ViTZoo(nn.Module):
             pass
         # feature encoder changes if transformer vs resnet
         self.feat = zoo_model
-     
+        embed_dim = self.feat.embed_dim if self.feat is not None else 768
+        print(f"[ViTZoo] Feature encoder embed_dim = {embed_dim}")
         #classifier
-        self.last = nn.Linear(768, num_classes) 
-        self.clf_norm = nn.LayerNorm(768)
+        self.last = nn.Linear(embed_dim, num_classes)   # <-- sửa embed_dim
+        self.clf_norm = nn.LayerNorm(embed_dim)  
 
         # create prompting module
         if self.prompt_flag == 'apt':
-            self.prompt = APT(768, prompt_param[0], prompt_param[1], ema_coeff=ema_coeff)
+            self.prompt = APT(embed_dim, prompt_param[0], prompt_param[1], ema_coeff=ema_coeff)
         else:
             self.prompt = None
 

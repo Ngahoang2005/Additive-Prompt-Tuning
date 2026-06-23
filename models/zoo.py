@@ -38,10 +38,7 @@ class APT(nn.Module):
         for i in range(12):
             setattr(self, f'k_layer_proj{i}', nn.Linear(2, 2))
             setattr(self, f'v_layer_proj{i}', nn.Linear(2, 2))
-        self.null_space_manager = NullSpaceManager(
-            feature_dim=emb_d,  # 768
-            device='cuda'
-        )
+        self.null_space_manager = NullSpaceManager(device='cuda')
         self.null_space_enabled = True 
    
     def merge_prompt(self, prompt1, prompt2):

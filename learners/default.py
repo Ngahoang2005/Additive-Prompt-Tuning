@@ -17,10 +17,8 @@ from timm.models.layers import trunc_normal_, DropPath
 import random
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+
 class NormalNN(nn.Module):
-    '''
-    Normal Neural Network with SGD for classification
-    '''
     def __init__(self, learner_config):
         super(NormalNN, self).__init__()
         self.log = print
@@ -32,44 +30,25 @@ class NormalNN(nn.Module):
         self.tasks = learner_config['tasks']
         self.top_k = learner_config['top_k']
         self.model = self.create_model()
-        # replay memory parameters
         self.memory_size = self.config['memory']
         self.task_count = 0
-
-        # class balancing
         self.dw = self.config['DW']
         if self.memory_size <= 0:
             self.dw = False
-
-        # supervised criterion
         self.criterion_fn = nn.CrossEntropyLoss(reduction='none')
-        
-        # cuda gpu
         if learner_config['gpuid'][0] >= 0:
             self.cuda()
             self.gpu = True
         else:
             self.gpu = False
-        
-        # highest class index from past task
-        self.last_valid_out_dim = 0 
-
-        # highest class index from current task
+        self.last_valid_out_dim = 0
         self.valid_out_dim = 0
-
-        # set up schedules
         self.schedule_type = self.config['schedule_type']
         self.schedule = self.config['schedule']
-
-        # initialize optimizer
         self.init_optimizer()
 
-    ##########################################
-    #           MODEL TRAINING               #
-    ##########################################
     def learn_batch(self, train_loader, train_dataset, model_save_dir):
-        
-        # try to load model
+
         need_train = True
         if not self.overwrite:
             try:
@@ -79,163 +58,148 @@ class NormalNN(nn.Module):
             except:
                 pass
 
-        # trains
-        if self.reset_optimizer:  # Reset optimizer before learning each task
+        if self.reset_optimizer:
             self.log('Optimizer is reset!')
             self.init_optimizer()
+
         if need_train:
-            
-            # data weighting
             losses = AverageMeter()
             acc = AverageMeter()
             batch_time = AverageMeter()
             batch_timer = Timer()
 
             for epoch in range(self.config['schedule'][-1]):
-                self.epoch=epoch
-
+                self.epoch = epoch
                 if epoch > 0: self.scheduler.step()
                 for param_group in self.optimizer.param_groups:
                     self.log('LR:', param_group['lr'])
                 batch_timer.tic()
-                     
-                for i, (x, y, task)  in enumerate(train_loader):
 
-                    # verify in train mode
+                for i, (x, y, task) in enumerate(train_loader):
                     self.model.train()
-
-                    # send data to gpu
                     if self.gpu:
                         x = x.cuda()
                         y = y.cuda()
-
-                    # model update  
-                    loss, output= self.update_model(x, y)
-
-                    # measure elapsed time
-                    batch_time.update(batch_timer.toc())  
+                    loss, output = self.update_model(x, y)
+                    batch_time.update(batch_timer.toc())
                     batch_timer.tic()
-                    
-                    # measure accuracy and record loss
                     y = y.detach()
                     accumulate_acc(output, y, task, acc, topk=(self.top_k,))
-                    losses.update(loss,  y.size(0)) 
+                    losses.update(loss, y.size(0))
                     batch_timer.tic()
 
-                # eval update
-                self.log('Epoch:{epoch:.0f}/{total:.0f}'.format(epoch=self.epoch+1,total=self.config['schedule'][-1]))
-                self.log(' * Loss {loss.avg:.3f} | Train Acc {acc.avg:.3f}'.format(loss=losses,acc=acc))
-
-                # reset
+                self.log('Epoch:{epoch:.0f}/{total:.0f}'.format(
+                    epoch=self.epoch+1, total=self.config['schedule'][-1]))
+                self.log(' * Loss {loss.avg:.3f} | Train Acc {acc.avg:.3f}'.format(
+                    loss=losses, acc=acc))
                 losses = AverageMeter()
                 acc = AverageMeter()
 
-                                         
         self.model.train()
-        if hasattr(self.model, 'prompt') and self.model.prompt.null_space_enabled:
-            # Dùng chính train_dataset (đã có memory) để thu thập features
-            self.collect_features_for_null_space(train_dataset)   # <--- SỬA: bỏ self.
 
-        merge_flag = self.model.prompt.merge_flag
+        # ── BƯỚC 1: PPF merge trước ──────────────────────────────────────
+        if hasattr(self.model, 'prompt') and self.model.prompt is not None:
+            merge_flag = self.model.prompt.merge_flag
+            if merge_flag:
+                if self.last_valid_out_dim == 0:
+                    self.model.prompt.global_merged_prompt = \
+                        self.model.prompt.prompt_tokens.clone().detach()
+                else:
+                    now_task_p = self.model.prompt.prompt_tokens.clone().detach()
+                    global_p = self.model.prompt.global_merged_prompt
+                    merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
+                    self.model.prompt.global_merged_prompt.data = merged_p
 
-        if merge_flag:
-            if self.last_valid_out_dim == 0:
-                self.model.prompt.global_merged_prompt = self.model.prompt.prompt_tokens.clone().detach()
-            else:
-                now_task_p = self.model.prompt.prompt_tokens.clone().detach()
-                global_p = self.model.prompt.global_merged_prompt
-                merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
-                
-                self.model.prompt.global_merged_prompt.data = merged_p
-            
+            # ── BƯỚC 2: Update null space SAU PPF merge ──────────────────
+            # Dùng merged prompt để extract features → đúng inference distribution
+            if self.model.prompt.null_space_enabled:
+                self.collect_features_for_null_space(train_loader)
+
         self.model.eval()
-
         self.last_valid_out_dim = self.valid_out_dim
         self.first_task = False
-        
-        # Extend memory
         self.task_count += 1
+
         if self.memory_size > 0:
-            train_dataset.update_coreset(self.memory_size, np.arange(self.last_valid_out_dim))
+            train_dataset.update_coreset(
+                self.memory_size, np.arange(self.last_valid_out_dim))
 
         try:
             return batch_time.avg
         except:
             return None
-    # default.py (trong class NormalNN, hoặc APT_Learner)
 
-    def collect_features_for_null_space(self, dataset):
+    @torch.no_grad()
+    def collect_features_for_null_space(self, train_loader, max_batches=20):
         """
-        Thu thập đặc trưng CLS token từ dataset để cập nhật Null Space.
-        Gọi sau mỗi task.
+        Thu thập CLS features với MERGED PROMPT (inference mode).
+        Phải gọi SAU PPF merge.
+        Dùng train_loader trực tiếp — không tạo DataLoader mới.
         """
-        if not hasattr(self.model, 'prompt') or not self.model.prompt.null_space_enabled:
+        if not hasattr(self.model, 'prompt') or \
+           not self.model.prompt.null_space_enabled:
             return
 
-        loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
-        features_list = []
         self.model.eval()
+        features_list = []
 
-        with torch.no_grad():
-            for x, y, _ in loader:
-                if self.gpu:
-                    x = x.cuda()
-                
-                # ===== QUAN TRỌNG: LẤY FEATURES TỪ FEATURE ENCODER =====
-                # self.model là ViTZoo, self.model.feat là VisionTransformer
-                if len(self.config['gpuid']) > 1:
-                    # Nếu dùng DataParallel, truy cập module
-                    out = self.model.module.feat(x)
-                else:
-                    out = self.model.feat(x)
-                    print(f"[DEBUG] out shape: {out.shape}")  # (B, num_patches+1, embed_dim)
-                # out shape: (B, num_patches+1, embed_dim)
-                cls_feat = out[:, 0, :]  # (B, embed_dim)
-                features_list.append(cls_feat.cpu())
-                # ======================================================
+        for batch_idx, (x, y, _) in enumerate(train_loader):
+            if batch_idx >= max_batches:
+                break
+            if self.gpu:
+                x = x.cuda()
+
+            # Forward với merged prompt — train=False dùng global_merged_prompt
+            if len(self.config['gpuid']) > 1:
+                feat_model = self.model.module
+            else:
+                feat_model = self.model
+
+            # Lấy CLS embedding với merged prompt, dim=768
+            out = feat_model.feat(
+                x, prompt=feat_model.prompt, train=False
+            )                              # [B, N+1, 768]
+            cls_feat = out[:, 0, :]        # [B, 768]
+            cls_feat = feat_model.clf_norm(cls_feat)  # [B, 768]
+            features_list.append(cls_feat.cpu())
+
+        if len(features_list) == 0:
+            return
+
+        features = torch.cat(features_list, dim=0)  # [N, 768]
+        self.log(f'[NullSpace] Collecting {features.shape[0]} features, dim={features.shape[1]}')
+
+        # Update null space với features dim=768
+        if len(self.config['gpuid']) > 1:
+            self.model.module.prompt.update_null_space(features)
+        else:
+            self.model.prompt.update_null_space(features)
 
         self.model.train()
-        if len(features_list) > 0:
-            features = torch.cat(features_list, dim=0)
-            # Cập nhật Null Space
-            if len(self.config['gpuid']) > 1:
-                self.model.module.prompt.update_null_space(features)
-            else:
-                self.model.prompt.update_null_space(features)
-        
-    def criterion(self, logits, targets): # data_weights [32]
+
+    def criterion(self, logits, targets):
         loss_supervised = (self.criterion_fn(logits, targets.long())).mean()
-        return loss_supervised 
+        return loss_supervised
 
     def update_model(self, inputs, targets):
-        
         logits = self.forward(inputs)
         total_loss = self.criterion(logits, targets.long())
-
         self.optimizer.zero_grad()
-       
         total_loss.backward()
         self.optimizer.step()
         return total_loss.detach(), logits
 
-    def validation(self, dataloader, model=None, task_in = None, task_metric='acc',  verbal = True, task_global=False):
+    def validation(self, dataloader, model=None, task_in=None,
+                   task_metric='acc', verbal=True, task_global=False):
         if model is None:
             model = self.model
-
-        # This function doesn't distinguish tasks.
         batch_timer = Timer()
         acc = AverageMeter()
         batch_timer.tic()
-
         orig_mode = model.training
         model.eval()
 
-        err_cnt = 0
-        old_cnt = 0
-        X = []
-        Y = []
         for i, (input, target, task) in enumerate(dataloader):
-
             if self.gpu:
                 with torch.no_grad():
                     input = input.cuda()
@@ -247,32 +211,26 @@ class NormalNN(nn.Module):
                 mask = target >= task_in[0]
                 mask_ind = mask.nonzero().view(-1)
                 input, target = input[mask_ind], target[mask_ind]
-
                 mask = target < task_in[-1]
-                mask_ind = mask.nonzero().view(-1) 
+                mask_ind = mask.nonzero().view(-1)
                 input, target = input[mask_ind], target[mask_ind]
                 if len(target) > 1:
                     if task_global:
-                        output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
+                        output = model.forward(input, local_test=False)[:, :self.valid_out_dim]
                         acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
                     else:
-                        output = model.forward(input,local_test=True)[:, task_in]
+                        output = model.forward(input, local_test=True)[:, task_in]
                         acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
-        
-        
-        model.train(orig_mode)
 
+        model.train(orig_mode)
         if verbal:
-            self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
-                    .format(acc=acc, time=batch_timer.toc()))
+            self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'.format(
+                acc=acc, time=batch_timer.toc()))
         return acc.avg
 
-    ##########################################
-    #             MODEL UTILS                #
-    ##########################################
     def save_model(self, filename):
         model_state = self.model.state_dict()
-        for key in model_state.keys():  # Always save it to cpu
+        for key in model_state.keys():
             model_state[key] = model_state[key].cpu()
         self.log('=> Saving class model to:', filename)
         torch.save(model_state, filename + 'class.pth')
@@ -281,26 +239,6 @@ class NormalNN(nn.Module):
     def load_model(self, filename):
         model_dict = torch.load(filename + 'class.pth')
         self.model.load_state_dict(model_dict, strict=False)
-
-        self.log('=> Load Done')
-        if self.gpu:
-            self.model = self.model.cuda()
-        self.model.eval()
-
-    def load_pretrained(self, filename):
-        model_dict = torch.load(filename + 'class.pth')
-        new_state_dict = {}
-        for key, value in model_dict.items():
-            new_key = key.replace("module.", "")  # Remove all instances of "module."
-            new_state_dict[new_key] = value
-        
-        new_state_dict["last.weight"] = self.model.last.weight.data
-        new_state_dict["last.bias"] = self.model.last.bias.data
-        new_state_dict["last2.weight"] = self.model.last2.weight.data
-        new_state_dict["last2.bias"] = self.model.last2.bias.data
-        
-        self.model.load_state_dict(new_state_dict, strict=False)
-
         self.log('=> Load Done')
         if self.gpu:
             self.model = self.model.cuda()
@@ -312,14 +250,11 @@ class NormalNN(nn.Module):
             model = model.cuda()
         return model.eval()
 
-    # sets model optimizers
     def init_optimizer(self):
-
-        # parse optimizer args
-        optimizer_arg = {'params':self.model.parameters(),
-                         'lr':self.config['lr'],
-                         'weight_decay':self.config['weight_decay']}
-        if self.config['optimizer'] in ['SGD','RMSprop']:
+        optimizer_arg = {'params': self.model.parameters(),
+                         'lr': self.config['lr'],
+                         'weight_decay': self.config['weight_decay']}
+        if self.config['optimizer'] in ['SGD', 'RMSprop']:
             optimizer_arg['momentum'] = self.config['momentum']
         elif self.config['optimizer'] in ['Rprop']:
             optimizer_arg.pop('weight_decay')
@@ -327,28 +262,24 @@ class NormalNN(nn.Module):
             optimizer_arg['amsgrad'] = True
             self.config['optimizer'] = 'Adam'
         elif self.config['optimizer'] == 'Adam':
-            optimizer_arg['betas'] = (self.config['momentum'],0.999)
-
-        # create optimizers
+            optimizer_arg['betas'] = (self.config['momentum'], 0.999)
         self.optimizer = torch.optim.__dict__[self.config['optimizer']](**optimizer_arg)
-        
-        # create schedules
         if self.schedule_type == 'cosine':
             self.scheduler = CosineSchedule(self.optimizer, K=self.schedule[-1])
         elif self.schedule_type == 'decay':
-            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=self.schedule, gamma=0.1)
+            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                self.optimizer, milestones=self.schedule, gamma=0.1)
 
     def create_model(self):
         cfg = self.config
-
-        # Define the backbone (MLP, LeNet, VGG, ResNet ... etc) of model
-        model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](out_dim=self.out_dim, tasks=self.tasks)
+        model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](
+            out_dim=self.out_dim, tasks=self.tasks)
         return model
 
     def print_model(self):
         self.log(self.model)
         self.log('#parameter of model:', self.count_parameter())
-    
+
     def reset_model(self):
         self.model.apply(weight_reset)
 
@@ -359,27 +290,29 @@ class NormalNN(nn.Module):
         self.model.eval()
         out = self.forward(inputs)
         return out
-    
+
     def add_valid_output_dim(self, dim=0):
-        # This function is kind of ad-hoc, but it is the simplest way to support incremental class learning
         self.log('Incremental class: Old valid output dimension:', self.valid_out_dim)
         self.valid_out_dim += dim
         self.log('Incremental class: New Valid output dimension:', self.valid_out_dim)
         return self.valid_out_dim
 
     def count_parameter(self):
-        return sum(p.numel() for p in self.model.parameters())   
+        return sum(p.numel() for p in self.model.parameters())
 
     def count_memory(self, dataset_size):
-        return self.count_parameter() + self.memory_size * dataset_size[0]*dataset_size[1]*dataset_size[2]
+        return self.count_parameter() + self.memory_size * \
+               dataset_size[0] * dataset_size[1] * dataset_size[2]
 
     def cuda(self):
         torch.cuda.set_device(self.config['gpuid'][0])
         self.model = self.model.cuda()
         self.criterion_fn = self.criterion_fn.cuda()
-        # Multi-GPU
         if len(self.config['gpuid']) > 1:
-            self.model = torch.nn.DataParallel(self.model, device_ids=self.config['gpuid'], output_device=self.config['gpuid'][0])
+            self.model = torch.nn.DataParallel(
+                self.model,
+                device_ids=self.config['gpuid'],
+                output_device=self.config['gpuid'][0])
         return self
 
     def _get_device(self):
@@ -390,28 +323,25 @@ class NormalNN(nn.Module):
     def pre_steps(self):
         pass
 
-class FinetunePlus(NormalNN):
 
+class FinetunePlus(NormalNN):
     def __init__(self, learner_config):
         super(FinetunePlus, self).__init__(learner_config)
 
-    def update_model(self, inputs, targets, target_KD = None):
-
-        # get output
+    def update_model(self, inputs, targets, target_KD=None):
         logits = self.forward(inputs)
-
-        # standard ce
-        logits[:,:self.last_valid_out_dim] = -float('inf')
+        logits[:, :self.last_valid_out_dim] = -float('inf')
         total_loss = self.criterion(logits, targets.long())
-
         self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
         return total_loss.detach(), logits
 
+
 def weight_reset(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
         m.reset_parameters()
+
 
 def accumulate_acc(output, target, task, meter, topk):
     meter.update(accuracy(output, target, topk), len(target))

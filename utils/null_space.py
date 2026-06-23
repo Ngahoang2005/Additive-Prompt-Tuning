@@ -8,13 +8,21 @@ class NullSpaceManager:
         self.feature_bank = []
         self.U = None
         self.rank = 0
+        self.D = None   # chiều thực tế, cập nhật từ features
 
     def update(self, features):
         if features is None or features.shape[0] == 0:
             return
         features = features.cpu()
 
-        # Thêm vào bank, giới hạn số mẫu
+        # Cập nhật D
+        if self.D is None:
+            self.D = features.shape[1]
+        else:
+            assert features.shape[1] == self.D, \
+                f"Feature dim mismatch: {features.shape[1]} vs {self.D}"
+
+        # Thêm vào bank
         if len(self.feature_bank) == 0:
             self.feature_bank.append(features)
         else:
@@ -24,31 +32,31 @@ class NullSpaceManager:
                 all_features = all_features[idx]
             self.feature_bank = [all_features]
 
-        X = self.feature_bank[0]
+        X = self.feature_bank[0]   # (N, D)
         mean = X.mean(dim=0, keepdim=True)
         X_centered = X - mean
-        U, S, _ = torch.svd(X_centered)
+        U, S, _ = torch.svd(X_centered)   # U: (D, D)
         rank = torch.sum(S > 1e-6).item()
         self.rank = rank
-        self.U = U[:, :rank].to(self.device)   # shape: (D, rank)
-        print(f"[NullSpace] Updated: D={self.U.shape[0]}, rank={rank}")
+        self.U = U[:, :rank].to(self.device)
+        print(f"[NullSpace] Updated: D={self.D}, rank={rank}")
 
     def project_gradient(self, grad):
         if self.U is None or self.U.numel() == 0:
             return grad
 
         device = grad.device
-        U = self.U.to(device)  # (D, rank)
+        U = self.U.to(device)          # (D, rank)
         original_shape = grad.shape
 
-        # Đảm bảo grad là (num_prompts, D)
+        # Đảm bảo grad có 2 chiều: (num_prompts, D)
         if len(original_shape) == 1:
             grad = grad.view(1, -1)
         elif len(original_shape) == 2:
             if grad.shape[1] != U.shape[0]:
                 raise ValueError(
                     f"Gradient dim {grad.shape[1]} != NullSpace D={U.shape[0]}\n"
-                    "Please check that prompt_tokens have same dimension as features."
+                    "Please ensure prompt_tokens have the same dimension as feature."
                 )
         else:
             raise ValueError(f"Unexpected grad shape: {original_shape}")

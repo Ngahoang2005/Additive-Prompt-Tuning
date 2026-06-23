@@ -8,22 +8,21 @@ class NullSpaceManager:
         self.feature_bank = []
         self.U = None
         self.rank = 0
-        self.D = None   # sẽ được cập nhật từ features
+        self.D = None   # chiều thực tế, sẽ được cập nhật từ features
 
     def update(self, features):
         if features is None or features.shape[0] == 0:
             return
         features = features.cpu()
 
-        # Cập nhật chiều D từ features
+        # Lấy chiều từ features
         if self.D is None:
             self.D = features.shape[1]
         else:
-            # Đảm bảo nhất quán
             assert features.shape[1] == self.D, \
                 f"Feature dim mismatch: {features.shape[1]} vs {self.D}"
 
-        # Thêm vào bank
+        # Cập nhật feature bank (giới hạn số mẫu)
         if len(self.feature_bank) == 0:
             self.feature_bank.append(features)
         else:
@@ -33,18 +32,23 @@ class NullSpaceManager:
                 all_features = all_features[idx]
             self.feature_bank = [all_features]
 
-        X = self.feature_bank[0]          # (N, D)
+        # SVD trên ma trận đã center
+        X = self.feature_bank[0]                     # (N, D)
         mean = X.mean(dim=0, keepdim=True)
         X_centered = X - mean
+        U, S, _ = torch.svd(X_centered)              # U: (D, D)
 
-        U, S, _ = torch.svd(X_centered)   # U: (D, D)
+        # Giữ các thành phần chính (singular values > 1e-6)
         rank = torch.sum(S > 1e-6).item()
         self.rank = rank
         self.U = U[:, :rank].to(self.device)
-
         print(f"[NullSpace] Updated: D={self.D}, rank={rank}")
 
     def project_gradient(self, grad):
+        """
+        Chiếu gradient lên không gian Null.
+        grad: tensor (num_prompts, D) hoặc (num_prompts * D,)
+        """
         if self.U is None or self.U.numel() == 0:
             return grad
 
@@ -54,13 +58,14 @@ class NullSpaceManager:
 
         # Đảm bảo grad có 2 chiều: (num_prompts, D)
         if len(original_shape) == 1:
-            # Nếu grad là vector, reshape thành (1, D)
             grad = grad.view(1, -1)
         elif len(original_shape) == 2:
-            # Kiểm tra chiều khớp
+            # Kiểm tra chiều khớp với U
             if grad.shape[1] != self.D:
                 raise ValueError(
-                    f"Gradient dim {grad.shape[1]} != NullSpace D={self.D}"
+                    f"Gradient dim {grad.shape[1]} != NullSpace D={self.D}\n"
+                    f"Maybe the model's embed_dim is not {self.D}. "
+                    "Please check your VisionTransformer config."
                 )
         else:
             raise ValueError(f"Unexpected grad shape: {original_shape}")
@@ -68,8 +73,8 @@ class NullSpaceManager:
         num_prompts = grad.shape[0]
 
         # Phép chiếu: g_proj = g - U (U^T g)
-        U_g = torch.mm(grad, U)            # (num_prompts, rank)
-        U_U_g = torch.mm(U_g, U.T)         # (num_prompts, D)
+        U_g = torch.mm(grad, U)          # (num_prompts, rank)
+        U_U_g = torch.mm(U_g, U.T)       # (num_prompts, D)
         grad_proj = grad - U_U_g
 
         return grad_proj.view(original_shape)

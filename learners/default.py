@@ -188,6 +188,7 @@ class NormalNN(nn.Module):
                     out = self.model.module.feat(x)
                 else:
                     out = self.model.feat(x)
+                    print(f"[DEBUG] out shape: {out.shape}")  # (B, num_patches+1, embed_dim)
                 # out shape: (B, num_patches+1, embed_dim)
                 cls_feat = out[:, 0, :]  # (B, embed_dim)
                 features_list.append(cls_feat.cpu())

@@ -8,21 +8,13 @@ class NullSpaceManager:
         self.feature_bank = []
         self.U = None
         self.rank = 0
-        self.D = None   # sẽ được cập nhật từ features
 
     def update(self, features):
         if features is None or features.shape[0] == 0:
             return
         features = features.cpu()
 
-        # Cập nhật chiều D từ features
-        if self.D is None:
-            self.D = features.shape[1]
-        else:
-            assert features.shape[1] == self.D, \
-                f"Feature dim mismatch: {features.shape[1]} vs {self.D}"
-
-        # Thêm vào bank (giới hạn số mẫu)
+        # Thêm vào bank, giới hạn số mẫu
         if len(self.feature_bank) == 0:
             self.feature_bank.append(features)
         else:
@@ -38,33 +30,30 @@ class NullSpaceManager:
         U, S, _ = torch.svd(X_centered)
         rank = torch.sum(S > 1e-6).item()
         self.rank = rank
-        self.U = U[:, :rank].to(self.device)
-        print(f"[NullSpace] Updated: D={self.D}, rank={rank}")
+        self.U = U[:, :rank].to(self.device)   # shape: (D, rank)
+        print(f"[NullSpace] Updated: D={self.U.shape[0]}, rank={rank}")
 
     def project_gradient(self, grad):
         if self.U is None or self.U.numel() == 0:
             return grad
 
         device = grad.device
-        U = self.U.to(device)          # (D, rank)
-
-        # Đảm bảo grad có shape (num_prompts, D)
+        U = self.U.to(device)  # (D, rank)
         original_shape = grad.shape
+
+        # Đảm bảo grad là (num_prompts, D)
         if len(original_shape) == 1:
             grad = grad.view(1, -1)
         elif len(original_shape) == 2:
-            # Kiểm tra khớp chiều
             if grad.shape[1] != U.shape[0]:
                 raise ValueError(
                     f"Gradient dim {grad.shape[1]} != NullSpace D={U.shape[0]}\n"
-                    "Please ensure prompt_tokens have the same dimension as feature."
+                    "Please check that prompt_tokens have same dimension as features."
                 )
         else:
             raise ValueError(f"Unexpected grad shape: {original_shape}")
 
         num_prompts = grad.shape[0]
-
-        # Phép chiếu: g_proj = g - U (U^T g)
         U_g = torch.mm(grad, U)        # (num_prompts, rank)
         U_U_g = torch.mm(U_g, U.T)     # (num_prompts, D)
         grad_proj = grad - U_U_g

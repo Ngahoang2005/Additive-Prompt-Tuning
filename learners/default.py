@@ -1,3 +1,4 @@
+# default.py
 from __future__ import print_function
 import math
 import torch
@@ -15,8 +16,7 @@ from utils.schedulers import CosineSchedule
 from timm.models.layers import trunc_normal_, DropPath
 import random
 import matplotlib.pyplot as plt
-
-
+from torch.utils.data import DataLoader
 class NormalNN(nn.Module):
     '''
     Normal Neural Network with SGD for classification
@@ -132,6 +132,9 @@ class NormalNN(nn.Module):
 
                                          
         self.model.train()
+        if hasattr(self.model, 'prompt') and self.model.prompt.null_space_enabled:
+            # Dùng chính train_dataset (đã có memory) để thu thập features
+            self.collect_features_for_null_space(train_dataset)   # <--- SỬA: bỏ self.
 
         merge_flag = self.model.prompt.merge_flag
 
@@ -159,6 +162,45 @@ class NormalNN(nn.Module):
             return batch_time.avg
         except:
             return None
+    # default.py (trong class NormalNN, hoặc APT_Learner)
+
+    def collect_features_for_null_space(self, dataset):
+        """
+        Thu thập đặc trưng CLS token từ dataset để cập nhật Null Space.
+        Gọi sau mỗi task.
+        """
+        if not hasattr(self.model, 'prompt') or not self.model.prompt.null_space_enabled:
+            return
+
+        loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
+        features_list = []
+        self.model.eval()
+
+        with torch.no_grad():
+            for x, y, _ in loader:
+                if self.gpu:
+                    x = x.cuda()
+                
+                # ===== QUAN TRỌNG: LẤY FEATURES TỪ FEATURE ENCODER =====
+                # self.model là ViTZoo, self.model.feat là VisionTransformer
+                if len(self.config['gpuid']) > 1:
+                    # Nếu dùng DataParallel, truy cập module
+                    out = self.model.module.feat(x)
+                else:
+                    out = self.model.feat(x)
+                # out shape: (B, num_patches+1, embed_dim)
+                cls_feat = out[:, 0, :]  # (B, embed_dim)
+                features_list.append(cls_feat.cpu())
+                # ======================================================
+
+        self.model.train()
+        if len(features_list) > 0:
+            features = torch.cat(features_list, dim=0)
+            # Cập nhật Null Space
+            if len(self.config['gpuid']) > 1:
+                self.model.module.prompt.update_null_space(features)
+            else:
+                self.model.prompt.update_null_space(features)
         
     def criterion(self, logits, targets): # data_weights [32]
         loss_supervised = (self.criterion_fn(logits, targets.long())).mean()

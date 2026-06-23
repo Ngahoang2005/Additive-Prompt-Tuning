@@ -1,3 +1,4 @@
+# prompt.py
 from __future__ import print_function
 import torch
 import models
@@ -84,3 +85,35 @@ class APT_Learner(Prompt_Learner):
         model = models.__dict__[cfg['model_type']].__dict__[cfg['model_name']](out_dim=self.out_dim, ema_coeff=self.ema_coeff, prompt_flag = 'apt', prompt_param=self.prompt_param, tasks=self.tasks)
         return model
 
+    def update_model(self, inputs, targets):
+        # Forward pass
+        logits = self.model(inputs, train=True)
+        logits = logits[:, :self.valid_out_dim]
+        logits[:, :self.last_valid_out_dim] = -float('inf')
+        total_loss = self.criterion(logits, targets.long())
+
+        # Backward
+        self.optimizer.zero_grad()
+        total_loss.backward()
+
+        # ===== THÊM: Áp dụng Null Space Projection lên gradient của prompt =====
+        # Lấy module prompt (xử lý cả trường hợp DataParallel)
+        if len(self.config['gpuid']) > 1:
+            prompt_module = self.model.module.prompt
+        else:
+            prompt_module = self.model.prompt
+
+        # Kiểm tra prompt có grad và Null Space được bật
+        if (prompt_module.null_space_enabled and 
+            prompt_module.prompt_tokens.grad is not None):
+            # Chiếu gradient
+            grad_proj = prompt_module.project_gradient(
+                prompt_module.prompt_tokens.grad
+            )
+            # Gán lại gradient đã chiếu
+            prompt_module.prompt_tokens.grad = grad_proj
+        # ===== KẾT THÚC THÊM =====
+
+        # Optimizer step
+        self.optimizer.step()
+        return total_loss.detach(), logits

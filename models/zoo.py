@@ -14,7 +14,7 @@ import random
 import math
 from operator import mul
 from functools import reduce
-
+from utils.null_space import NullSpaceManager
 
 class APT(nn.Module):
     def __init__(self, emb_d, n_tasks, prompt_param, ema_coeff):
@@ -38,7 +38,11 @@ class APT(nn.Module):
         for i in range(12):
             setattr(self, f'k_layer_proj{i}', nn.Linear(2, 2))
             setattr(self, f'v_layer_proj{i}', nn.Linear(2, 2))
-         
+        self.null_space_manager = NullSpaceManager(
+            feature_dim=emb_d,  # 768
+            device='cuda'
+        )
+        self.null_space_enabled = True 
    
     def merge_prompt(self, prompt1, prompt2):
         print("Merging prompt ... ")
@@ -71,6 +75,17 @@ class APT(nn.Module):
         P = [P_k, P_v]    
 
         return P #, rpt_index
+    def update_null_space(self, features):
+        """Gọi từ bên ngoài sau mỗi task để cập nhật không gian Null."""
+        if self.null_space_enabled:
+            self.null_space_manager.update(features)
+
+    # ===== PHƯƠNG THỨC MỚI: Chiếu gradient =====
+    def project_gradient(self, grad):
+        """Chiếu gradient của prompt lên không gian Null."""
+        if self.null_space_enabled:
+            return self.null_space_manager.project_gradient(grad)
+        return grad
 
 # note - ortho init has not been found to help l2p/dual prompt
 def create_prompt_with_init(a, b, c=None, ortho=False, mean=None, std=None, init_ref=None):

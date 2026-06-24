@@ -132,19 +132,51 @@ class NormalNN(nn.Module):
 
                                          
         self.model.train()
-
         merge_flag = self.model.prompt.merge_flag
 
         if merge_flag:
             if self.last_valid_out_dim == 0:
-                self.model.prompt.global_merged_prompt = self.model.prompt.prompt_tokens.clone().detach()
+                # Task 1: lưu prompt, tính prototypes lần đầu
+                self.model.prompt.global_merged_prompt = \
+                    self.model.prompt.prompt_tokens.clone().detach()
+
+                if hasattr(self, 'compute_prototypes'):
+                    task_classes = list(range(self.valid_out_dim))
+                    new_protos = self.compute_prototypes(
+                        train_loader, task_classes
+                    )
+                    self.class_prototypes.update(new_protos)
+                    self.log(f'Stored {len(new_protos)} prototypes for task 1')
+
             else:
+                # Task t≥2: merge → correct drift → update prototypes
+                prompt_old = self.model.prompt.global_merged_prompt.clone()
+
                 now_task_p = self.model.prompt.prompt_tokens.clone().detach()
-                global_p = self.model.prompt.global_merged_prompt
-                merged_p = self.model.prompt.merge_prompt(global_p, now_task_p)
-                
+                global_p   = self.model.prompt.global_merged_prompt
+                merged_p   = self.model.prompt.merge_prompt(global_p, now_task_p)
                 self.model.prompt.global_merged_prompt.data = merged_p
-            
+
+                prompt_new = self.model.prompt.global_merged_prompt.clone()
+
+                # Correct prototypes cũ với drift
+                if hasattr(self, 'compute_drift_and_correct'):
+                    self.compute_drift_and_correct(
+                        train_loader, prompt_old, prompt_new
+                    )
+
+                # Tính prototypes cho classes mới
+                task_classes = list(range(
+                    self.last_valid_out_dim, self.valid_out_dim
+                ))
+                new_protos = self.compute_prototypes(
+                    train_loader, task_classes
+                )
+                self.class_prototypes.update(new_protos)
+                self.log(
+                    f'Updated prototypes: '
+                    f'{len(self.class_prototypes)} total classes'
+                )
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim
@@ -175,56 +207,53 @@ class NormalNN(nn.Module):
         self.optimizer.step()
         return total_loss.detach(), logits
 
-    def validation(self, dataloader, model=None, task_in = None, task_metric='acc',  verbal = True, task_global=False):
+    def validation(self, dataloader, model=None, task_in=None,
+                   task_metric='acc', verbal=True, task_global=False):
         if model is None:
             model = self.model
 
-        # This function doesn't distinguish tasks.
+        # Nếu có prototypes → dùng NCM
+        use_ncm = (
+            hasattr(self, 'class_prototypes')
+            and len(self.class_prototypes) > 0
+            and task_in is None  # chỉ global eval
+        )
+
         batch_timer = Timer()
         acc = AverageMeter()
         batch_timer.tic()
-
         orig_mode = model.training
         model.eval()
 
-        err_cnt = 0
-        old_cnt = 0
-        X = []
-        Y = []
-        for i, (input, target, task) in enumerate(dataloader):
+        with torch.no_grad():
+            for x, target, task in dataloader:
+                x, target = x.cuda(), target.cuda()
 
-            if self.gpu:
-                with torch.no_grad():
-                    input = input.cuda()
-                    target = target.cuda()
-            if task_in is None:
-                output = model.forward(input)[:, :self.valid_out_dim]
-                acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-            else:
-                mask = target >= task_in[0]
-                mask_ind = mask.nonzero().view(-1)
-                input, target = input[mask_ind], target[mask_ind]
+                if use_ncm:
+                    # Extract features
+                    feat = model.feat(
+                        x, prompt=model.prompt, train=False
+                    )[:, 0, :]
+                    feat = model.clf_norm(feat)
 
-                mask = target < task_in[-1]
-                mask_ind = mask.nonzero().view(-1) 
-                input, target = input[mask_ind], target[mask_ind]
-                if len(target) > 1:
-                    if task_global:
-                        output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
-                        acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-                    else:
-                        output = model.forward(input,local_test=True)[:, task_in]
-                        acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
-        
-        
+                    # NCM classify
+                    _, sims = self.ncm_classify(feat)
+                    # Chỉ xét valid classes
+                    output = sims[:, :self.valid_out_dim]
+                else:
+                    output = model.forward(x)[:, :self.valid_out_dim]
+
+                acc = accumulate_acc(
+                    output, target, task, acc, topk=(self.top_k,)
+                )
+
         model.train(orig_mode)
-
         if verbal:
-            self.log(' * Val Acc {acc.avg:.3f}, Total time {time:.2f}'
-                    .format(acc=acc, time=batch_timer.toc()))
-        return acc.avg
-
-    ##########################################
+            self.log(
+                f' * Val Acc {acc.avg:.3f}, '
+                f'Total time {batch_timer.toc():.2f}'
+            )
+        return acc.avg    ##########################################
     #             MODEL UTILS                #
     ##########################################
     def save_model(self, filename):

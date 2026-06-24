@@ -136,47 +136,54 @@ class NormalNN(nn.Module):
 
         if merge_flag:
             if self.last_valid_out_dim == 0:
-                # Task 1: lưu prompt, tính prototypes lần đầu
+                # ── Task 1: PPF init + tính stats ──────────────────
                 self.model.prompt.global_merged_prompt = \
                     self.model.prompt.prompt_tokens.clone().detach()
 
-                if hasattr(self, 'compute_prototypes'):
-                    task_classes = list(range(self.valid_out_dim))
-                    new_protos = self.compute_prototypes(
-                        train_loader, task_classes
-                    )
-                    self.class_prototypes.update(new_protos)
-                    self.log(f'Stored {len(new_protos)} prototypes for task 1')
+                if hasattr(self, 'compute_new_task_stats'):
+                    feats, labels = self.extract_features(train_loader)
+                    task_classes  = list(range(self.valid_out_dim))
+                    self.compute_new_task_stats(feats, labels, task_classes)
+                    self.log(f'Task 1: computed stats for '
+                             f'{len(task_classes)} classes')
 
             else:
-                # Task t≥2: merge → correct drift → update prototypes
-                prompt_old = self.model.prompt.global_merged_prompt.clone()
+                # ── Task t≥2: DPCR flow ─────────────────────────────
 
+                # 1. Lấy features với prompt CŨ (trước merge)
+                feats_old, _ = self.extract_features(train_loader)
+
+                # 2. PPF merge
                 now_task_p = self.model.prompt.prompt_tokens.clone().detach()
                 global_p   = self.model.prompt.global_merged_prompt
                 merged_p   = self.model.prompt.merge_prompt(global_p, now_task_p)
                 self.model.prompt.global_merged_prompt.data = merged_p
 
-                prompt_new = self.model.prompt.global_merged_prompt.clone()
+                # 3. Lấy features với prompt MỚI (sau merge)
+                feats_new, labels = self.extract_features(train_loader)
 
-                # Correct prototypes cũ với drift
-                if hasattr(self, 'compute_drift_and_correct'):
-                    self.compute_drift_and_correct(
-                        train_loader, prompt_old, prompt_new
-                    )
+                # 4. TSSP: tính task-wise projection matrix
+                P_tssp = self.compute_tssp(feats_old, feats_new)
+                self.log(f'TSSP computed, '
+                         f'||P - I||={( P_tssp - torch.eye(P_tssp.shape[0], device=P_tssp.device)).norm().item():.4f}')
 
-                # Tính prototypes cho classes mới
+                # 5. Calibrate stats cũ với dual projection (TSSP + CIP)
+                self.calibrate_old_stats(P_tssp)
+
+                # 6. Tính stats cho task mới
                 task_classes = list(range(
                     self.last_valid_out_dim, self.valid_out_dim
                 ))
-                new_protos = self.compute_prototypes(
-                    train_loader, task_classes
-                )
-                self.class_prototypes.update(new_protos)
-                self.log(
-                    f'Updated prototypes: '
-                    f'{len(self.class_prototypes)} total classes'
-                )
+                self.compute_new_task_stats(feats_new, labels, task_classes)
+
+                # 7. Reconstruct classifier bằng ridge regression
+                W_new = self.reconstruct_classifier()
+                # Gán vào classifier (chỉ phần valid)
+                with torch.no_grad():
+                    self.model.last.weight[:self.valid_out_dim].copy_(W_new)
+
+                self.log(f'Classifier reconstructed for '
+                         f'{self.valid_out_dim} classes')
         self.model.eval()
 
         self.last_valid_out_dim = self.valid_out_dim

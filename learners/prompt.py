@@ -78,8 +78,16 @@ class APT_Learner(Prompt_Learner):
 
     def __init__(self, learner_config):
         super(APT_Learner, self).__init__(learner_config)
-        # {class_idx: prototype_vector (768,)}
-        self.class_prototypes = {}
+        self.ridge_gamma = learner_config.get('ridge_gamma', 1.0)
+        
+        # Lưu thông tin tích lũy qua tasks
+        # Key: class_idx, Value: dict với 'Phi', 'mu', 'H', 'N'
+        self.class_stats = {}
+        
+        # Tổng hợp để reconstruct classifier
+        # Phi_sum = sum_{i<=t} sum_{c in Ci} Phi^{theta_t}_{i,c}
+        self.Phi_sum = None   # (d, d)
+        self.H_sum   = None   # (d, n_classes_total)
 
     def create_model(self):
         cfg = self.config
@@ -92,108 +100,175 @@ class APT_Learner(Prompt_Learner):
         )
         return model
 
-    def compute_prototypes(self, dataloader, task_classes):
+    # ─────────────────────────────────────────────────────────────
+    # STEP 1: Extract features dùng current merged prompt
+    # ─────────────────────────────────────────────────────────────
+    def extract_features(self, dataloader, use_train_prompt=False):
         """
-        Tính prototype = mean CLS embedding cho từng class trong task.
-        Dùng global_merged_prompt (inference mode).
+        Extract CLS features + labels từ dataloader.
+        use_train_prompt=False → dùng global_merged_prompt (inference)
+        Returns: features (N, d), labels (N,)
         """
         self.model.eval()
-        proto_sum = {}
-        proto_count = {}
-
-        for cls in task_classes:
-            proto_sum[cls] = torch.zeros(768).cuda()
-            proto_count[cls] = 0
+        all_feats, all_labels = [], []
 
         with torch.no_grad():
             for x, y, _ in dataloader:
                 x, y = x.cuda(), y.cuda()
-                # Forward inference mode — dùng global_merged_prompt
                 feat = self.model.feat(
-                    x, prompt=self.model.prompt, train=False
-                )[:, 0, :]  # (B, 768)
-                feat = self.model.clf_norm(feat)  # normalize giống training
-
-                for i, cls_idx in enumerate(y.tolist()):
-                    if cls_idx in proto_sum:
-                        proto_sum[cls_idx] += feat[i]
-                        proto_count[cls_idx] += 1
-
-        prototypes = {}
-        for cls in task_classes:
-            if proto_count[cls] > 0:
-                prototypes[cls] = proto_sum[cls] / proto_count[cls]
+                    x, prompt=self.model.prompt,
+                    train=use_train_prompt
+                )[:, 0, :]
+                feat = self.model.clf_norm(feat)
+                all_feats.append(feat)
+                all_labels.append(y)
 
         self.model.train()
-        return prototypes
+        return torch.cat(all_feats), torch.cat(all_labels)
 
-    def compute_drift_and_correct(self, dataloader, prompt_old, prompt_new):
+    # ─────────────────────────────────────────────────────────────
+    # STEP 2: Tính TSSP — task-wise projection matrix
+    # Closed-form: P = (X_old^T X_old + eps*I)^{-1} X_old^T X_new
+    # ─────────────────────────────────────────────────────────────
+    def compute_tssp(self, feats_old, feats_new, eps=1e-9):
         """
-        Tính drift vector = mean(f(x; p_new) - f(x; p_old)) trên current data.
-        Sau đó correct tất cả prototypes cũ.
-
-        Trong APT: backbone frozen → drift gần đồng nhất với mọi input
-        → correction chính xác, không phải ước lượng.
+        feats_old: (N, d) — features với prompt cũ
+        feats_new: (N, d) — features với prompt mới
+        Returns P: (d, d) — task-wise projection
         """
-        self.model.eval()
-        drift_sum = torch.zeros(768).cuda()
-        n = 0
+        d = feats_old.shape[1]
+        A = feats_old.t() @ feats_old + eps * torch.eye(d, device=feats_old.device)
+        B = feats_old.t() @ feats_new
+        # Solve A @ P = B → P = A^{-1} B
+        P = torch.linalg.solve(A, B)
+        return P   # (d, d)
 
-        with torch.no_grad():
-            for x, _, _ in dataloader:
-                x = x.cuda()
-
-                # Feature với prompt mới (đã merge)
-                self.model.prompt.global_merged_prompt = prompt_new
-                feat_new = self.model.feat(
-                    x, prompt=self.model.prompt, train=False
-                )[:, 0, :]
-                feat_new = self.model.clf_norm(feat_new)
-
-                # Feature với prompt cũ (trước merge)
-                self.model.prompt.global_merged_prompt = prompt_old
-                feat_old = self.model.feat(
-                    x, prompt=self.model.prompt, train=False
-                )[:, 0, :]
-                feat_old = self.model.clf_norm(feat_old)
-
-                drift_sum += (feat_new - feat_old).mean(dim=0)
-                n += 1
-
-        drift = drift_sum / max(n, 1)
-
-        # Restore prompt mới
-        self.model.prompt.global_merged_prompt = prompt_new
-
-        # Correct tất cả prototypes cũ
-        self.log(f'Drift magnitude: {drift.norm().item():.4f}')
-        for cls in self.class_prototypes:
-            self.class_prototypes[cls] = self.class_prototypes[cls] + drift
-
-        self.model.train()
-
-    def ncm_classify(self, features):
+    # ─────────────────────────────────────────────────────────────
+    # STEP 3: Tính CIP — category-specific projection
+    # P_c = P @ U_c^r U_c^{r,T} (project vào row space của class c)
+    # ─────────────────────────────────────────────────────────────
+    def compute_cip(self, P_tssp, Phi_c, rank_ratio=0.9):
         """
-        Nearest Class Mean classification bằng cosine similarity.
-        features: (B, 768)
-        Returns: (B,) predicted class indices
+        P_tssp: (d, d) — task-wise projection
+        Phi_c:  (d, d) — uncentered covariance của class c
+        rank_ratio: giữ lại eigenvectors giải thích rank_ratio variance
+        Returns P_c: (d, d) — category-specific projection
         """
-        if not self.class_prototypes:
-            raise ValueError("No prototypes stored yet")
+        # SVD của covariance
+        U, S, Vh = torch.linalg.svd(Phi_c, full_matrices=False)
+        
+        # Chọn số rank để giữ lại rank_ratio variance
+        total_var = S.sum()
+        cumvar = S.cumsum(0)
+        r = (cumvar < rank_ratio * total_var).sum().item() + 1
+        r = max(1, min(r, len(S)))
+        
+        U_r = U[:, :r]  # (d, r) — top-r eigenvectors
+        
+        # P_c = P_tssp @ U_r @ U_r^T
+        P_c = P_tssp @ U_r @ U_r.t()
+        return P_c   # (d, d)
 
-        classes = sorted(self.class_prototypes.keys())
-        proto_matrix = torch.stack(
-            [self.class_prototypes[c] for c in classes]
-        )  # (n_classes, 768)
+    # ─────────────────────────────────────────────────────────────
+    # STEP 4: Calibrate stats cũ với dual projection
+    # Phi_new = P_c^T Phi_old P_c
+    # mu_new  = mu_old @ P_c
+    # ─────────────────────────────────────────────────────────────
+    def calibrate_old_stats(self, P_tssp):
+        """
+        Cập nhật tất cả class stats cũ với dual projection.
+        Thực hiện sau PPF merge, trước khi tính stats mới.
+        """
+        self.log("Calibrating old class stats with Dual Projection...")
+        
+        for cls_idx, stats in self.class_stats.items():
+            Phi_c = stats['Phi']   # (d, d)
+            mu_c  = stats['mu']    # (d,)
+            N_c   = stats['N']
+            
+            # CIP: project P_tssp vào row space của class c
+            P_c = self.compute_cip(P_tssp, Phi_c)
+            
+            # Calibrate covariance: Phi_new = P_c^T Phi_old P_c
+            Phi_c_new = P_c.t() @ Phi_c @ P_c
+            
+            # Calibrate prototype: mu_new = mu_old @ P_c
+            mu_c_new = mu_c @ P_c
+            
+            # Update
+            self.class_stats[cls_idx]['Phi'] = Phi_c_new
+            self.class_stats[cls_idx]['mu']  = mu_c_new
+            
+            # Recalculate H từ calibrated mu
+            # H_c = N_c * mu_c^T * one_hot(cls)
+            # (stored separately in H_sum, update below)
 
-        # Cosine similarity
-        feat_norm = F.normalize(features, dim=1)
-        proto_norm = F.normalize(proto_matrix, dim=1)
-        sims = feat_norm @ proto_norm.t()  # (B, n_classes)
+    # ─────────────────────────────────────────────────────────────
+    # STEP 5: Tính stats cho task mới
+    # ─────────────────────────────────────────────────────────────
+    def compute_new_task_stats(self, feats_new, labels, task_classes):
+        """
+        Tính Phi_c, mu_c, H_c cho các classes mới.
+        feats_new: (N, d) — features với merged prompt mới
+        labels:    (N,)
+        task_classes: list of class indices
+        """
+        d = feats_new.shape[1]
+        n_total = self.valid_out_dim  # tổng số classes đến nay
+        
+        for cls_idx in task_classes:
+            mask = (labels == cls_idx)
+            if mask.sum() == 0:
+                continue
+            
+            X_c = feats_new[mask]   # (N_c, d)
+            N_c = X_c.shape[0]
+            
+            Phi_c = X_c.t() @ X_c          # (d, d)
+            mu_c  = X_c.mean(dim=0)        # (d,)
+            
+            self.class_stats[cls_idx] = {
+                'Phi': Phi_c,
+                'mu':  mu_c,
+                'N':   N_c,
+            }
 
-        pred_local = sims.argmax(dim=1)  # local index
-        pred_global = torch.tensor(
-            [classes[i] for i in pred_local.tolist()]
-        ).to(features.device)
+    # ─────────────────────────────────────────────────────────────
+    # STEP 6: Reconstruct classifier bằng ridge regression
+    # W* = (sum Phi_c + gamma*I)^{-1} (sum H_c)
+    # ─────────────────────────────────────────────────────────────
+    def reconstruct_classifier(self):
+        """
+        Ridge regression classifier reconstruction.
+        W* = (Σ Phi_c + γI)^{-1} (Σ H_c)
+        
+        H_c = N_c * mu_c (outer product với one-hot → column của W)
+        
+        Category-wise normalization: normalize mỗi cột của W
+        """
+        d = next(iter(self.class_stats.values()))['Phi'].shape[0]
+        n_classes = self.valid_out_dim
+        
+        Phi_sum = torch.zeros(d, d).cuda()
+        W_cols  = []
 
-        return pred_global, sims
+        sorted_classes = sorted(self.class_stats.keys())
+        
+        for cls_idx in sorted_classes:
+            stats = self.class_stats[cls_idx]
+            Phi_sum += stats['Phi']
+            # H_c = N_c * mu_c → cột tương ứng trong W
+            W_cols.append(stats['N'] * stats['mu'])
+
+        # W_cols: list of (d,) → stack thành (d, n_classes)
+        H_sum = torch.stack(W_cols, dim=1)   # (d, n_classes)
+        
+        # Solve: (Phi_sum + gamma*I) @ W = H_sum
+        A = Phi_sum + self.ridge_gamma * torch.eye(d, device=Phi_sum.device)
+        W = torch.linalg.solve(A, H_sum)   # (d, n_classes)
+        
+        # Category-wise normalization (CN) — từ DPCR Eq.22
+        W_norm = W / (W.norm(dim=0, keepdim=True) + 1e-10)
+        
+        self.log(f'Reconstructed classifier: W shape {W_norm.shape}')
+        return W_norm.t()   # (n_classes, d) — same layout as self.model.last.weight

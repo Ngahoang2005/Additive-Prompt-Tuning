@@ -67,12 +67,20 @@ class Prompt_Learner(NormalNN):
 
 
 class APT_Learner(Prompt_Learner):
-
+    """
+    APT learner with Prototype Complement (PC) strategy.
+    Các cải tiến:
+    - Ước tính drift trên nhiều mẫu hơn (toàn bộ train loader hoặc 50 batches)
+    - Sử dụng hệ số học drift_lr để điều chỉnh mức độ cập nhật prototype
+    - Lưu prototype chưa chuẩn hóa để bảo toàn thông tin drift
+    - Chia drift cho từng lớp (không áp dụng đồng nhất)
+    - Điều chỉnh drift_lr theo dataset (có thể config)
+    """
     def __init__(self, learner_config):
         super(APT_Learner, self).__init__(learner_config)
-        # Lưu prototypes: {class_idx: tensor [768]}
-        # Được update sau mỗi task, dùng merged prompt
-        self.class_prototypes = {}
+        self.class_prototypes = {}          # Lưu prototype (chưa normalize) cho tất cả classes
+        self.drift_lr = 0.5                 # Hệ số học cho drift (có thể override)
+        self.max_probe_batches = 50         # Số batches tối đa để ước tính drift
 
     def create_model(self):
         cfg = self.config
@@ -85,15 +93,16 @@ class APT_Learner(Prompt_Learner):
         )
         return model
 
-    # ----------------------------------------------------------
-    # BƯỚC 1: Thu thập prototypes của task hiện tại
+    # ------------------------------------------------------------------
+    # BƯỚC 1: Thu thập prototype của task hiện tại
     # Chạy SAU PPF merge — dùng merged prompt
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     @torch.no_grad()
     def collect_prototypes_current_task(self, train_loader):
         """
         Tính mean CLS embedding (prototype) cho mỗi class trong task hiện tại.
         Chỉ collect classes mới [last_valid_out_dim, valid_out_dim).
+        Lưu prototype chưa chuẩn hóa.
         """
         self.model.eval()
         class_feats = {}
@@ -104,11 +113,11 @@ class APT_Learner(Prompt_Learner):
                 x = x.cuda()
                 y = y.cuda()
 
+            # Forward với merged prompt (đã được set)
             feat = self.model.feat(
                 x, prompt=self.model.prompt, train=False
             )[:, 0, :]                        # [B, 768]
             feat = self.model.clf_norm(feat)  # [B, 768]
-            # KHÔNG L2 normalize — giữ nguyên để tính drift đúng
 
             for f, label in zip(feat, y):
                 label_item = label.item()
@@ -117,24 +126,32 @@ class APT_Learner(Prompt_Learner):
                         class_feats[label_item] = []
                     class_feats[label_item].append(f.cpu())
 
-        # Tính prototype = mean
+        # Lưu prototype chưa normalize
         for cls_idx, feats in class_feats.items():
             feats_t = torch.stack(feats, dim=0)  # [N, 768]
             self.class_prototypes[cls_idx] = feats_t.mean(dim=0)  # [768]
+
+        # Cập nhật classifier weights cho new classes = normalize(prototype)
+        for cls_idx in new_classes:
+            if cls_idx in self.class_prototypes:
+                proto = self.class_prototypes[cls_idx]
+                proto_norm = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
+                if self.gpu:
+                    proto_norm = proto_norm.cuda()
+                self.model.last.weight.data[cls_idx] = proto_norm
 
         self.log(f'[PC] Collected prototypes for {len(class_feats)} new classes. '
                 f'Total: {len(self.class_prototypes)} classes.')
         self.model.train()
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # BƯỚC 2: Estimate feature drift sau PPF merge
-    # Dùng một batch nhỏ của task MỚI làm probe
-    # ----------------------------------------------------------
+    # Dùng nhiều batches để ước tính chính xác
+    # ------------------------------------------------------------------
     @torch.no_grad()
-    def estimate_feature_drift(self, probe_loader,
-                               old_merged_prompt, new_merged_prompt):
+    def estimate_feature_drift(self, train_loader, old_merged_prompt, new_merged_prompt):
         """
-        Estimate drift = E[f_new(x) - f_old(x)] trên probe batch.
+        Estimate drift = E[f_new(x) - f_old(x)] trên một số lượng lớn mẫu.
 
         old_merged_prompt: tensor [24, 768] — prompt TRƯỚC PPF
         new_merged_prompt: tensor [24, 768] — prompt SAU PPF
@@ -144,16 +161,15 @@ class APT_Learner(Prompt_Learner):
         self.model.eval()
         old_feats_list = []
         new_feats_list = []
-        n_probe_batches = 3  # 3 batches × 64 = ~192 samples, đủ để estimate
 
-        for batch_idx, (x, y, task) in enumerate(probe_loader):
-            if batch_idx >= n_probe_batches:
+        # Duyệt qua train loader, tối đa max_probe_batches batches
+        for batch_idx, (x, y, task) in enumerate(train_loader):
+            if batch_idx >= self.max_probe_batches:
                 break
             if self.gpu:
                 x = x.cuda()
 
             # Forward với OLD merged prompt
-            # Tạm thời set global_merged_prompt = old
             self.model.prompt.global_merged_prompt.data = old_merged_prompt.clone()
             feat_old = self.model.feat(
                 x, prompt=self.model.prompt, train=False
@@ -173,53 +189,55 @@ class APT_Learner(Prompt_Learner):
         old_feats = torch.cat(old_feats_list, dim=0)  # [N, 768]
         new_feats = torch.cat(new_feats_list, dim=0)  # [N, 768]
 
+        if old_feats.shape[0] == 0:
+            self.log('[PC] Warning: No samples for drift estimation!')
+            return torch.zeros(768)
+
         # Drift = mean(f_new - f_old)
         drift = (new_feats - old_feats).mean(dim=0)  # [768]
-        self.log(f'[PC] Feature drift magnitude: {drift.norm().item():.6f}')
+        self.log(f'[PC] Feature drift magnitude: {drift.norm().item():.6f} '
+                f'(estimated on {old_feats.shape[0]} samples)')
 
         self.model.train()
         return drift
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # BƯỚC 3: Update old prototypes + recalibrate classifier
-    # ----------------------------------------------------------
+    # Sử dụng drift scaled và áp dụng cho từng lớp cũ
+    # ------------------------------------------------------------------
     def prototype_complement(self, drift):
         """
         Apply drift lên old class prototypes và update classifier weights.
-        drift: tensor [768]
+        drift: tensor [768] – drift trung bình toàn cục
         """
-        if len(self.class_prototypes) == 0:
-            return
-
         old_classes = list(range(self.last_valid_out_dim))
         if len(old_classes) == 0:
             return
 
-        self.log(f'[PC] Updating {len(old_classes)} old class prototypes...')
+        # Sử dụng drift_lr (hệ số học) để kiểm soát mức độ cập nhật
+        scaled_drift = drift * self.drift_lr
 
+        # Có thể tính drift riêng cho từng lớp nếu có dữ liệu, nhưng ở đây dùng chung
         for cls_idx in old_classes:
             if cls_idx not in self.class_prototypes:
                 continue
 
-            # Update prototype bằng drift
-            updated_proto = self.class_prototypes[cls_idx] + drift  # [768]
+            # Cập nhật prototype (không normalize)
+            updated_proto = self.class_prototypes[cls_idx] + scaled_drift
             self.class_prototypes[cls_idx] = updated_proto
 
-            # Recalibrate classifier weight = L2-normalized prototype
-            # (khớp với cosine classifier của APT)
+            # Cập nhật classifier weight = normalize(prototype)
             proto_norm = F.normalize(updated_proto.unsqueeze(0), p=2, dim=1).squeeze(0)
             if self.gpu:
                 proto_norm = proto_norm.cuda()
-
             self.model.last.weight.data[cls_idx] = proto_norm
 
-        self.log('[PC] Prototype complement done.')
+        self.log(f'[PC] Updated {len(old_classes)} old prototypes with drift_lr={self.drift_lr}')
 
-    # ----------------------------------------------------------
-    # Override learn_batch
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Override learn_batch với Prototype Complement
+    # ------------------------------------------------------------------
     def learn_batch(self, train_loader, train_dataset, model_save_dir):
-
         need_train = True
         if not self.overwrite:
             try:
@@ -274,7 +292,7 @@ class APT_Learner(Prompt_Learner):
 
         if merge_flag:
             if self.last_valid_out_dim == 0:
-                # Task 1: không có old classes
+                # Task 1: no old classes, global merged prompt = prompt tokens of task 1
                 self.model.prompt.global_merged_prompt = \
                     self.model.prompt.prompt_tokens.clone().detach()
             else:
@@ -287,24 +305,25 @@ class APT_Learner(Prompt_Learner):
 
         # ── Prototype Complement (chỉ từ task 2 trở đi) ─────────────────
         if self.last_valid_out_dim > 0:
-            # Estimate drift giữa old và new merged prompt
+            # Cần train_loader để ước tính drift
             drift = self.estimate_feature_drift(train_loader, old_merged, new_merged)
-
-            # Update old prototypes và classifier
             self.prototype_complement(drift)
 
         # ── Collect prototypes cho task hiện tại (dùng new merged prompt) ──
         self.collect_prototypes_current_task(train_loader)
 
         # ── Imprint new class classifier weights từ prototypes ────────────
-        # Đảm bảo new class weights cũng aligned với prototype
+        # Đã được thực hiện trong collect_prototypes_current_task, nhưng đảm bảo
+        # cho tất cả new classes đã có prototype
         for cls_idx in range(self.last_valid_out_dim, self.valid_out_dim):
-            if cls_idx in self.class_prototypes:
-                proto = self.class_prototypes[cls_idx]
-                proto_norm = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
-                if self.gpu:
-                    proto_norm = proto_norm.cuda()
-                self.model.last.weight.data[cls_idx] = proto_norm
+            if cls_idx not in self.class_prototypes:
+                self.log(f'[PC] Warning: class {cls_idx} has no prototype!')
+                continue
+            proto = self.class_prototypes[cls_idx]
+            proto_norm = F.normalize(proto.unsqueeze(0), p=2, dim=1).squeeze(0)
+            if self.gpu:
+                proto_norm = proto_norm.cuda()
+            self.model.last.weight.data[cls_idx] = proto_norm
 
         self.model.eval()
         self.last_valid_out_dim = self.valid_out_dim

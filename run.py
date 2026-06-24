@@ -57,7 +57,8 @@ def create_args():
     # Config Arg
     parser.add_argument('--config', type=str, default="configs/config.yaml",
                          help="yaml experiment config input")
-
+    parser.add_argument('--ridge_gamma', type=float, default=1.0,
+                    help="regularization for ridge regression classifier")
     return parser
 
 def get_args(argv):

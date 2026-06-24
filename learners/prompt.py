@@ -104,11 +104,6 @@ class APT_Learner(Prompt_Learner):
     # STEP 1: Extract features dùng current merged prompt
     # ─────────────────────────────────────────────────────────────
     def extract_features(self, dataloader, use_train_prompt=False):
-        """
-        Extract CLS features + labels từ dataloader.
-        use_train_prompt=False → dùng global_merged_prompt (inference)
-        Returns: features (N, d), labels (N,)
-        """
         self.model.eval()
         all_feats, all_labels = [], []
 
@@ -120,28 +115,28 @@ class APT_Learner(Prompt_Learner):
                     train=use_train_prompt
                 )[:, 0, :]
                 feat = self.model.clf_norm(feat)
+                feat = F.normalize(feat, dim=1)   # thêm dòng này
                 all_feats.append(feat)
                 all_labels.append(y)
 
         self.model.train()
         return torch.cat(all_feats), torch.cat(all_labels)
-
     # ─────────────────────────────────────────────────────────────
     # STEP 2: Tính TSSP — task-wise projection matrix
     # Closed-form: P = (X_old^T X_old + eps*I)^{-1} X_old^T X_new
     # ─────────────────────────────────────────────────────────────
     def compute_tssp(self, feats_old, feats_new, eps=1e-9):
-        """
-        feats_old: (N, d) — features với prompt cũ
-        feats_new: (N, d) — features với prompt mới
-        Returns P: (d, d) — task-wise projection
-        """
-        d = feats_old.shape[1]
-        A = feats_old.t() @ feats_old + eps * torch.eye(d, device=feats_old.device)
-        B = feats_old.t() @ feats_new
-        # Solve A @ P = B → P = A^{-1} B
+        # Normalize trước để tránh numerical instability
+        feats_old_n = F.normalize(feats_old, dim=1)
+        feats_new_n = F.normalize(feats_new, dim=1)
+        
+        d = feats_old_n.shape[1]
+        A = feats_old_n.t() @ feats_old_n + eps * torch.eye(d, device=feats_old_n.device)
+        B = feats_old_n.t() @ feats_new_n
         P = torch.linalg.solve(A, B)
-        return P   # (d, d)
+        
+        self.log(f'TSSP ||P - I||={( P - torch.eye(d, device=P.device)).norm().item():.4f}')
+        return P
 
     # ─────────────────────────────────────────────────────────────
     # STEP 3: Tính CIP — category-specific projection
@@ -238,37 +233,25 @@ class APT_Learner(Prompt_Learner):
     # W* = (sum Phi_c + gamma*I)^{-1} (sum H_c)
     # ─────────────────────────────────────────────────────────────
     def reconstruct_classifier(self):
-        """
-        Ridge regression classifier reconstruction.
-        W* = (Σ Phi_c + γI)^{-1} (Σ H_c)
-        
-        H_c = N_c * mu_c (outer product với one-hot → column của W)
-        
-        Category-wise normalization: normalize mỗi cột của W
-        """
         d = next(iter(self.class_stats.values()))['Phi'].shape[0]
-        n_classes = self.valid_out_dim
-        
+        n_classes = self.valid_out_dim   # dùng valid_out_dim, không phải len(class_stats)
+
         Phi_sum = torch.zeros(d, d).cuda()
-        W_cols  = []
+        # Khởi tạo W với đủ n_classes columns — zero cho classes chưa có stats
+        H_mat = torch.zeros(d, n_classes).cuda()
 
-        sorted_classes = sorted(self.class_stats.keys())
-        
-        for cls_idx in sorted_classes:
-            stats = self.class_stats[cls_idx]
+        for cls_idx, stats in self.class_stats.items():
+            if cls_idx >= n_classes:
+                continue
             Phi_sum += stats['Phi']
-            # H_c = N_c * mu_c → cột tương ứng trong W
-            W_cols.append(stats['N'] * stats['mu'])
+            H_mat[:, cls_idx] = stats['N'] * stats['mu']
 
-        # W_cols: list of (d,) → stack thành (d, n_classes)
-        H_sum = torch.stack(W_cols, dim=1)   # (d, n_classes)
-        
-        # Solve: (Phi_sum + gamma*I) @ W = H_sum
         A = Phi_sum + self.ridge_gamma * torch.eye(d, device=Phi_sum.device)
-        W = torch.linalg.solve(A, H_sum)   # (d, n_classes)
-        
-        # Category-wise normalization (CN) — từ DPCR Eq.22
+        W = torch.linalg.solve(A, H_mat)   # (d, n_classes)
+
+        # Category-wise normalization
         W_norm = W / (W.norm(dim=0, keepdim=True) + 1e-10)
-        
-        self.log(f'Reconstructed classifier: W shape {W_norm.shape}')
-        return W_norm.t()   # (n_classes, d) — same layout as self.model.last.weight
+
+        self.log(f'Reconstructed classifier: W shape {W_norm.t().shape}, '
+                 f'classes with stats: {len(self.class_stats)}/{n_classes}')
+        return W_norm.t()   # (n_classes, d)

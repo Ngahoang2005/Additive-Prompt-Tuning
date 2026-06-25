@@ -177,10 +177,11 @@ class NormalNN(nn.Module):
                 self.compute_new_task_stats(feats_new, labels, task_classes)
 
                 # 7. Reconstruct classifier bằng ridge regression
-                W_new = self.reconstruct_classifier()
-                # Gán vào classifier (chỉ phần valid)
-                with torch.no_grad():
-                    self.model.last.weight[:self.valid_out_dim].copy_(W_new)
+                # Sau calibrate_old_stats và compute_new_task_stats
+                # Không cần reconstruct_classifier và không gán vào last.weight
+                self.log(
+                    f'Updated stats for {len(self.class_stats)} classes'
+                )
 
                 self.log(f'Classifier reconstructed for '
                          f'{self.valid_out_dim} classes')
@@ -215,15 +216,15 @@ class NormalNN(nn.Module):
         return total_loss.detach(), logits
 
     def validation(self, dataloader, model=None, task_in=None,
-                   task_metric='acc', verbal=True, task_global=False):
+               task_metric='acc', verbal=True, task_global=False):
         if model is None:
             model = self.model
 
-        # Nếu có prototypes → dùng NCM
+        # Dùng NCM nếu có class_stats
         use_ncm = (
-            hasattr(self, 'class_prototypes')
-            and len(self.class_prototypes) > 0
-            and task_in is None  # chỉ global eval
+            hasattr(self, 'class_stats')
+            and len(self.class_stats) > 0
+            and task_in is None
         )
 
         batch_timer = Timer()
@@ -237,16 +238,38 @@ class NormalNN(nn.Module):
                 x, target = x.cuda(), target.cuda()
 
                 if use_ncm:
-                    # Extract features
+                    # Extract normalized features
                     feat = model.feat(
                         x, prompt=model.prompt, train=False
                     )[:, 0, :]
                     feat = model.clf_norm(feat)
+                    feat_n = F.normalize(feat, dim=1)
 
-                    # NCM classify
-                    _, sims = self.ncm_classify(feat)
+                    # Build prototype matrix từ class_stats
+                    classes = sorted(self.class_stats.keys())
                     # Chỉ xét valid classes
-                    output = sims[:, :self.valid_out_dim]
+                    valid_classes = [c for c in classes
+                                    if c < self.valid_out_dim]
+                    
+                    proto_mat = torch.stack([
+                        F.normalize(self.class_stats[c]['mu'].unsqueeze(0),
+                                    dim=1).squeeze(0)
+                        for c in valid_classes
+                    ])  # (n_valid, d)
+
+                    # Cosine similarity → logits
+                    sims = feat_n @ proto_mat.t()  # (B, n_valid)
+
+                    # Map local index → global class index
+                    # output phải có shape (B, valid_out_dim)
+                    output = torch.full(
+                        (x.shape[0], self.valid_out_dim),
+                        -float('inf'),
+                        device=x.device
+                    )
+                    for local_i, cls_idx in enumerate(valid_classes):
+                        output[:, cls_idx] = sims[:, local_i]
+
                 else:
                     output = model.forward(x)[:, :self.valid_out_dim]
 
@@ -260,7 +283,7 @@ class NormalNN(nn.Module):
                 f' * Val Acc {acc.avg:.3f}, '
                 f'Total time {batch_timer.toc():.2f}'
             )
-        return acc.avg    ##########################################
+        return acc.avg
     #             MODEL UTILS                #
     ##########################################
     def save_model(self, filename):

@@ -125,20 +125,27 @@ class APT_Learner(Prompt_Learner):
     # STEP 2: Tính TSSP — task-wise projection matrix
     # Closed-form: P = (X_old^T X_old + eps*I)^{-1} X_old^T X_new
     # ─────────────────────────────────────────────────────────────
-    def compute_tssp(self, feats_old, feats_new, eps=1e-9):
-        # Normalize trước để tránh numerical instability
+    def compute_tssp(self, feats_old, feats_new, eps=1.0):
+        """
+        eps lớn hơn để tránh ill-conditioned matrix.
+        Default eps=1e-9 quá nhỏ → P explode khi features không full rank.
+        """
         feats_old_n = F.normalize(feats_old, dim=1)
         feats_new_n = F.normalize(feats_new, dim=1)
-        
+
         d = feats_old_n.shape[1]
-        A = feats_old_n.t() @ feats_old_n + eps * torch.eye(d, device=feats_old_n.device)
+        # eps=1.0 tương đương ridge regression với gamma=1
+        # Đảm bảo P bounded: ||P|| <= ||feats_old||/eps
+        A = feats_old_n.t() @ feats_old_n \
+            + eps * torch.eye(d, device=feats_old_n.device)
         B = feats_old_n.t() @ feats_new_n
         P = torch.linalg.solve(A, B)
-        
-        self.log(f'TSSP ||P - I||={( P - torch.eye(d, device=P.device)).norm().item():.4f}')
-        return P
 
-    # ─────────────────────────────────────────────────────────────
+        self.log(
+            f'TSSP ||P - I||='
+            f'{(P - torch.eye(d, device=P.device)).norm().item():.4f}'
+        )
+        return P    # ─────────────────────────────────────────────────────────────
     # STEP 3: Tính CIP — category-specific projection
     # P_c = P @ U_c^r U_c^{r,T} (project vào row space của class c)
     # ─────────────────────────────────────────────────────────────
@@ -170,65 +177,60 @@ class APT_Learner(Prompt_Learner):
     # mu_new  = mu_old @ P_c
     # ─────────────────────────────────────────────────────────────
     def calibrate_old_stats(self, P_tssp):
-        """
-        Cập nhật tất cả class stats cũ với dual projection.
-        Thực hiện sau PPF merge, trước khi tính stats mới.
-        """
         self.log("Calibrating old class stats with Dual Projection...")
         
         for cls_idx, stats in self.class_stats.items():
-            Phi_c = stats['Phi']   # (d, d)
-            mu_c  = stats['mu']    # (d,)
-            N_c   = stats['N']
-            
-            # CIP: project P_tssp vào row space của class c
+            Phi_c = stats['Phi']
+            mu_c  = stats['mu']
+
+            # CIP
             P_c = self.compute_cip(P_tssp, Phi_c)
-            
-            # Calibrate covariance: Phi_new = P_c^T Phi_old P_c
+
+            # Clamp P_c để tránh explode
+            P_c_norm = P_c / (P_c.norm() + 1e-10)
+            # Scale về đơn vị hợp lý
+            scale = min(P_c.norm().item(), 2.0)
+            P_c = P_c_norm * scale
+
+            # Calibrate
             Phi_c_new = P_c.t() @ Phi_c @ P_c
-            
-            # Calibrate prototype: mu_new = mu_old @ P_c
-            mu_c_new = mu_c @ P_c
-            
-            # Update
+            mu_c_new  = mu_c @ P_c
+
+            # Re-normalize mu sau calibration
+            mu_c_new = F.normalize(mu_c_new.unsqueeze(0), dim=1).squeeze(0)
+
             self.class_stats[cls_idx]['Phi'] = Phi_c_new
             self.class_stats[cls_idx]['mu']  = mu_c_new
-            
-            # Recalculate H từ calibrated mu
-            # H_c = N_c * mu_c^T * one_hot(cls)
-            # (stored separately in H_sum, update below)
-
     # ─────────────────────────────────────────────────────────────
     # STEP 5: Tính stats cho task mới
     # ─────────────────────────────────────────────────────────────
     def compute_new_task_stats(self, feats_new, labels, task_classes):
         """
-        Tính Phi_c, mu_c, H_c cho các classes mới.
-        feats_new: (N, d) — features với merged prompt mới
-        labels:    (N,)
-        task_classes: list of class indices
+        feats_new phải đã được normalize (L2) trước khi truyền vào.
         """
-        d = feats_new.shape[1]
-        n_total = self.valid_out_dim  # tổng số classes đến nay
-        
         for cls_idx in task_classes:
             mask = (labels == cls_idx)
             if mask.sum() == 0:
+                self.log(f'WARNING: class {cls_idx} has 0 samples!')
+                # Fallback: zero prototype
+                d = feats_new.shape[1]
+                self.class_stats[cls_idx] = {
+                    'Phi': torch.eye(d, device=feats_new.device) * 1e-6,
+                    'mu':  torch.zeros(d, device=feats_new.device),
+                    'N':   0,
+                }
                 continue
-            
-            X_c = feats_new[mask]   # (N_c, d)
+
+            X_c = feats_new[mask]
             N_c = X_c.shape[0]
-            
-            Phi_c = X_c.t() @ X_c          # (d, d)
-            mu_c  = X_c.mean(dim=0)        # (d,)
-            
+            Phi_c = X_c.t() @ X_c
+            mu_c  = X_c.mean(dim=0)
+
             self.class_stats[cls_idx] = {
                 'Phi': Phi_c,
                 'mu':  mu_c,
                 'N':   N_c,
-            }
-
-    # ─────────────────────────────────────────────────────────────
+            }    # ─────────────────────────────────────────────────────────────
     # STEP 6: Reconstruct classifier bằng ridge regression
     # W* = (sum Phi_c + gamma*I)^{-1} (sum H_c)
     # ─────────────────────────────────────────────────────────────

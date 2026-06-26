@@ -14,7 +14,7 @@ OVERWRITE=1
 LR=0.02
 SCHEDULE=25
 EMA_COEFF=0.7
-SEED_LIST=(3)
+SEED_LIST=(2 3)
 
 # Set delay between experiments (in seconds)
 DELAY_BETWEEN_EXPERIMENTS=10  # Adjust this value as needed

@@ -78,11 +78,17 @@ class NormalNN(nn.Module):
                 need_train = False
             except:
                 pass
-
+        if self.last_valid_out_dim > 0:
+            frozen_model = copy.deepcopy(self.model)
+            frozen_model.eval()
+            for p in frozen_model.parameters():
+                p.requires_grad = False
+            self.frozen_logits_fn = lambda x: frozen_model(x)
         # trains
         if self.reset_optimizer:  # Reset optimizer before learning each task
             self.log('Optimizer is reset!')
             self.init_optimizer()
+
         if need_train:
             
             # data weighting

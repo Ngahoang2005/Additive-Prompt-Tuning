@@ -12,19 +12,38 @@ class Prompt_Learner(NormalNN):
         super(Prompt_Learner, self).__init__(learner_config)
 
     def update_model(self, inputs, targets):
-        # logits
-        logits = self.model(inputs, train=True)
+        logits = self.model(inputs, train=True)  # [B, total_classes]
         
-        logits = logits[:,:self.valid_out_dim]
-        logits[:,:self.last_valid_out_dim] = -float('inf')
-        total_loss = self.criterion(logits, targets.long())       
+        # CE loss chỉ trên new classes (như cũ)
+        logits_new = logits[:, :self.valid_out_dim].clone()
+        logits_new[:, :self.last_valid_out_dim] = -float('inf')
+        ce_loss = self.criterion(logits_new, targets.long())
         
-        # step
+        # CCL: consistency loss — old class logits nên consistent
+        # với logits từ frozen model (trước khi train task T)
+        if self.last_valid_out_dim > 0 and hasattr(self, 'frozen_logits_fn'):
+            with torch.no_grad():
+                old_logits = self.frozen_logits_fn(inputs)  # [B, last_valid]
+            
+            # KL divergence giữa current và frozen old logits
+            curr_old = logits[:, :self.last_valid_out_dim]
+            ccl_loss = F.kl_div(
+                F.log_softmax(curr_old / 2.0, dim=1),
+                F.softmax(old_logits[:, :self.last_valid_out_dim] / 2.0, dim=1),
+                reduction='batchmean'
+            )
+            total_loss = ce_loss + 0.1 * ccl_loss
+        else:
+            total_loss = ce_loss
+        
         self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
-        
-        return total_loss.detach(), logits
+        return total_loss.detach(), logits_new
+
+
+
+
 
     def get_attn_heatmap(self, inputs):
         return 

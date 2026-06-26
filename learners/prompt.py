@@ -4,7 +4,7 @@ import models
 from utils.metric import accuracy, AverageMeter, Timer
 from .default import NormalNN, weight_reset, accumulate_acc
 from utils.schedulers import CosineSchedule
-
+import torch.nn.functional as F
 class Prompt_Learner(NormalNN):
     def __init__(self, learner_config):
         self.prompt_param = learner_config['prompt_param']

@@ -78,7 +78,7 @@ class APT_Learner(Prompt_Learner):
 
     def __init__(self, learner_config):
         super(APT_Learner, self).__init__(learner_config)
-        self.ccl_alpha  = learner_config.get('ccl_alpha', 0.5)
+        self.ccl_alpha  = learner_config.get('ccl_alpha', 0.3)
         self.ccl_margin = learner_config.get('ccl_margin', 0.1)
         self.ccl_tau    = learner_config.get('ccl_tau', 1.15)
     def create_model(self):

@@ -159,7 +159,10 @@ class Trainer:
                         'tasks': self.tasks_logits,
                         'top_k': self.top_k,
                         'prompt_param':[self.num_tasks,args.prompt_param],
-                        'ema_coeff': args.ema_coeff
+                        'ema_coeff': args.ema_coeff,
+                        'ccl_alpha': args.ccl_alpha,
+                        'ccl_margin': args.ccl_margin,
+                        'ccl_tau': args.ccl_tau,
                         }
         self.learner_type, self.learner_name = args.learner_type, args.learner_name
         self.learner = learners.__dict__[self.learner_type].__dict__[self.learner_name](self.learner_config)

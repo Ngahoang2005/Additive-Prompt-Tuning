@@ -2,6 +2,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
+from email import parser
+from html import parser
 import os
 import sys
 import argparse
@@ -57,7 +59,9 @@ def create_args():
     # Config Arg
     parser.add_argument('--config', type=str, default="configs/config.yaml",
                          help="yaml experiment config input")
-
+    parser.add_argument('--ccl_alpha', type=float, default=0.5, help="weight of classifier consistency loss")
+    parser.add_argument('--ccl_margin', type=float, default=0.1, help="margin for CCL temperature switch")
+    parser.add_argument('--ccl_tau', type=float, default=1.15, help="temperature for CCL smoothing")
     return parser
 
 def get_args(argv):

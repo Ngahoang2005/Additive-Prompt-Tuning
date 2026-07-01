@@ -197,6 +197,24 @@ class NormalNN(nn.Module):
                 with torch.no_grad():
                     input = input.cuda()
                     target = target.cuda()
+            if self.task_count > 1 and i == 0: 
+                with torch.no_grad():
+                    # Ép model nhả ra toàn bộ logits của tất cả class hiện có
+                    debug_logits = model.forward(input)[:, :self.valid_out_dim]
+                
+                old_mean = debug_logits[:, :self.last_valid_out_dim].mean().item()
+                new_mean = debug_logits[:, self.last_valid_out_dim:self.valid_out_dim].mean().item()
+                
+                # target.min() và max() cho biết batch ảnh này thuộc class nào
+                print(f"\n[DEBUG] Đang Test Batch - Ground Truth Classes: {target.min().item()} đến {target.max().item()}")
+                print(f" -> Logits TB các class CŨ  (0 đến {self.last_valid_out_dim-1}): {old_mean:.4f}")
+                print(f" -> Logits TB các class MỚI ({self.last_valid_out_dim} đến {self.valid_out_dim-1}): {new_mean:.4f}")
+                
+                # Nếu nhãn thật lớn nhất trong batch vẫn nhỏ hơn ranh giới class cũ -> Đây là ảnh Task Cũ
+                if target.max().item() < self.last_valid_out_dim and new_mean > old_mean:
+                    print(" 🚨 BÁO ĐỘNG ĐỎ: Đang test ảnh Task CŨ nhưng Classifier lại thiên vị, cho Logit Task MỚI cao hơn!")
+            # KẾT THÚC ĐOẠN DEBUG
+            # ==============================================================
             if task_in is None:
                 output = model.forward(input)[:, :self.valid_out_dim]
                 acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))

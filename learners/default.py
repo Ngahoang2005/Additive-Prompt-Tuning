@@ -211,7 +211,22 @@ class NormalNN(nn.Module):
                 if len(target) > 1:
                     if task_global:
                         output = model.forward(input,local_test=False)[:, :self.valid_out_dim]
+                        if self.task_count > 1 and i == 0:
+                            # Tính Logit trung bình của nhóm class Cũ và Mới
+                            old_logits_mean = output[:, :self.last_valid_out_dim].mean().item()
+                            new_logits_mean = output[:, self.last_valid_out_dim:self.valid_out_dim].mean().item()
+                            
+                            print(f"\n[DEBUG] Đang đánh giá trên dữ liệu của Task chứa class {task_in[0]} đến {task_in[-1]}")
+                            print(f" -> Điểm Logit TB dự đoán cho nhóm class CŨ  (0 đến {self.last_valid_out_dim-1}): {old_logits_mean:.4f}")
+                            print(f" -> Điểm Logit TB dự đoán cho nhóm class MỚI ({self.last_valid_out_dim} đến {self.valid_out_dim-1}): {new_logits_mean:.4f}")
+                            
+                            # Cảnh báo nếu đang test trên ảnh Task cũ nhưng lại bị bias điểm sang Task mới
+                            if task_in[-1] < self.last_valid_out_dim and new_logits_mean > old_logits_mean:
+                                print(" 🚨 BÁO ĐỘNG INCONSISTENCY: Ảnh thuộc Task CŨ nhưng mạng lại thiên vị, cho điểm class MỚI cao hơn!")
+                        # KẾT THÚC ĐOẠN DEBUG
+                        # ==============================================================
                         acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+
                     else:
                         output = model.forward(input,local_test=True)[:, task_in]
                         acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))

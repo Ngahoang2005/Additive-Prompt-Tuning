@@ -57,7 +57,10 @@ def create_args():
     # Config Arg
     parser.add_argument('--config', type=str, default="configs/config.yaml",
                          help="yaml experiment config input")
-
+    # run.py
+    parser.add_argument('--ccl_alpha', type=float, default=0.0, help="CCL regularization weight (0 = off)")
+    parser.add_argument('--ccl_tau1', type=float, default=1.05, help="CCL smoothing temperature")
+    parser.add_argument('--ccl_margin', type=float, default=0.02, help="CCL margin, calibrate to logit scale (cosine ~[-1,1] here)")
     return parser
 
 def get_args(argv):

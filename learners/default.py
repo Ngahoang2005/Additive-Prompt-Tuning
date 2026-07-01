@@ -56,14 +56,14 @@ class NormalNN(nn.Module):
 
         # highest class index from current task
         self.valid_out_dim = 0
-
+        self.task_boundaries = [] 
         # set up schedules
         self.schedule_type = self.config['schedule_type']
         self.schedule = self.config['schedule']
 
         # initialize optimizer
         self.init_optimizer()
-
+ 
     ##########################################
     #           MODEL TRAINING               #
     ##########################################
@@ -358,7 +358,9 @@ class NormalNN(nn.Module):
     def add_valid_output_dim(self, dim=0):
         # This function is kind of ad-hoc, but it is the simplest way to support incremental class learning
         self.log('Incremental class: Old valid output dimension:', self.valid_out_dim)
+        start = self.valid_out_dim
         self.valid_out_dim += dim
+        self.task_boundaries.append((start, self.valid_out_dim))   # NEW
         self.log('Incremental class: New Valid output dimension:', self.valid_out_dim)
         return self.valid_out_dim
 

@@ -199,20 +199,25 @@ class NormalNN(nn.Module):
                     target = target.cuda()
             if self.task_count > 1 and i == 0: 
                 with torch.no_grad():
-                    # Ép model nhả ra toàn bộ logits của tất cả class hiện có
                     debug_logits = model.forward(input)[:, :self.valid_out_dim]
                 
-                old_mean = debug_logits[:, :self.last_valid_out_dim].mean().item()
-                new_mean = debug_logits[:, self.last_valid_out_dim:self.valid_out_dim].mean().item()
+                # TỰ TÍNH RANH GIỚI: Tổng số class hiện tại chia cho số Task
+                classes_per_task = self.valid_out_dim // self.task_count
+                boundary = self.valid_out_dim - classes_per_task
                 
-                # target.min() và max() cho biết batch ảnh này thuộc class nào
+                old_mean = debug_logits[:, :boundary].mean().item()
+                new_mean = debug_logits[:, boundary:self.valid_out_dim].mean().item()
+                
                 print(f"\n[DEBUG] Đang Test Batch - Ground Truth Classes: {target.min().item()} đến {target.max().item()}")
-                print(f" -> Logits TB các class CŨ  (0 đến {self.last_valid_out_dim-1}): {old_mean:.4f}")
-                print(f" -> Logits TB các class MỚI ({self.last_valid_out_dim} đến {self.valid_out_dim-1}): {new_mean:.4f}")
+                print(f" -> Logits TB các class CŨ  (0 đến {boundary-1}): {old_mean:.4f}")
+                print(f" -> Logits TB các class MỚI ({boundary} đến {self.valid_out_dim-1}): {new_mean:.4f}")
                 
-                # Nếu nhãn thật lớn nhất trong batch vẫn nhỏ hơn ranh giới class cũ -> Đây là ảnh Task Cũ
-                if target.max().item() < self.last_valid_out_dim and new_mean > old_mean:
-                    print(" 🚨 BÁO ĐỘNG ĐỎ: Đang test ảnh Task CŨ nhưng Classifier lại thiên vị, cho Logit Task MỚI cao hơn!")
+                # Check Inconsistency: Nếu ảnh là của Task CŨ nhưng logit Task MỚI lại cao hơn
+                if target.max().item() < boundary:
+                    if new_mean > old_mean:
+                        print(" 🚨 BÁO ĐỘNG ĐỎ: Classifier bị Inconsistency! Ảnh Task CŨ bị thiên vị chấm điểm Task MỚI cao hơn!")
+                    else:
+                        print(" ✅ NGON LÀNH: PPF hoạt động tốt! Ảnh Task CŨ vẫn được giữ điểm cao ở nhóm CŨ.")
             # KẾT THÚC ĐOẠN DEBUG
             # ==============================================================
             if task_in is None:

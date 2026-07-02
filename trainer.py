@@ -163,7 +163,7 @@ class Trainer:
                         # trainer.py - learner_config dict
                         'ccl_alpha': args.ccl_alpha,
                         'ccl_tau1': args.ccl_tau1,
-                        'ccl_margin': args.ccl_margin,
+                        'ccl_margin': args.ccl_margin
                         }
         self.learner_type, self.learner_name = args.learner_type, args.learner_name
         self.learner = learners.__dict__[self.learner_type].__dict__[self.learner_name](self.learner_config)

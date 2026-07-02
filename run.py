@@ -53,14 +53,14 @@ def create_args():
     parser.add_argument('--lr', type=float, default=0.005, help="learning rate for training")
     parser.add_argument('--ema_coeff', type=float, default=0.5, help="ema coefficient for prompt merging")
     parser.add_argument('--schedule', type=int, default=50,  help="epoch size for training")
-
-    # Config Arg
-    parser.add_argument('--config', type=str, default="configs/config.yaml",
-                         help="yaml experiment config input")
     # run.py
     parser.add_argument('--ccl_alpha', type=float, default=0.0, help="CCL regularization weight (0 = off)")
     parser.add_argument('--ccl_tau1', type=float, default=1.05, help="CCL smoothing temperature")
     parser.add_argument('--ccl_margin', type=float, default=0.02, help="CCL margin, calibrate to logit scale (cosine ~[-1,1] here)")
+    # Config Arg
+    parser.add_argument('--config', type=str, default="configs/config.yaml",
+                         help="yaml experiment config input")
+    
     return parser
 
 def get_args(argv):
